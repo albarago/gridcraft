@@ -2180,6 +2180,7 @@ dependencies = [
  "epaint_default_fonts",
  "gridcraft-chart",
  "gridcraft-engine",
+ "gridcraft-vba",
  "gridcraft-xlsx",
  "image",
  "log",
