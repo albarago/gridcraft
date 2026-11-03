@@ -54,6 +54,7 @@ pub mod text_box;
 pub mod theme;
 #[cfg(not(target_arch = "wasm32"))]
 mod updates_ui;
+pub mod vba_view;
 pub mod widgets;
 mod window_ui;
 

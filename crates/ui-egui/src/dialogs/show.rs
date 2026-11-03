@@ -151,6 +151,7 @@ pub fn show(app: &mut SheetApp, ctx: &egui::Context) {
         "about" => 660.0,
         "insertFunction" | "commandSearch" | "nameManager" | "manageRules" | "journal" | "agents" | "equation" => 520.0,
         "macros" => 480.0,
+        crate::vba_view::DIALOG => 760.0,
         "recommendedCharts" => 600.0,
         "analysisToolPak" => 420.0,
         "solver" => 460.0,
@@ -162,7 +163,8 @@ pub fn show(app: &mut SheetApp, ctx: &egui::Context) {
     let window = egui::Window::new(app.ui.language.tr(&d.title))
         .id(window_id)
         .collapsible(false)
-        .resizable(false)
+        // View Code is a reading window: it can be made larger, like the step editor.
+        .resizable(d.name == crate::vba_view::DIALOG)
         .default_width(width)
         // A default position, not an anchor: egui anchors can't be dragged, and dialogs move by their title bar.
         .pivot(egui::Align2::CENTER_CENTER)
@@ -171,6 +173,7 @@ pub fn show(app: &mut SheetApp, ctx: &egui::Context) {
     let window = match d.name.as_str() {
         "insertPicture" => window.default_height(240.0),
         "advancedFilter" => window.default_height(0.0),
+        crate::vba_view::DIALOG => window.default_height(520.0).min_width(480.0).min_height(320.0),
         _ => window,
     };
     let (window, collapsed) = place_window(app, ctx, &mut d, window, window_id);
@@ -180,7 +183,10 @@ pub fn show(app: &mut SheetApp, ctx: &egui::Context) {
                 ref_edit(app, ui, &mut d, key, RefLabel::Named(&title), (width - 40.0).min(380.0));
                 return;
             }
-            ui.set_min_width(width - 20.0);
+            // A resizable window can be made narrower than it opens.
+            if d.name != crate::vba_view::DIALOG {
+                ui.set_min_width(width - 20.0);
+            }
             match d.name.as_str() {
                 "formatCells" => format_cells(app, ui, &mut d, &mut confirm),
                 "dataValidation" => data_validation_form(app, ui, &mut d, &mut confirm, &mut open),
@@ -220,6 +226,7 @@ pub fn show(app: &mut SheetApp, ctx: &egui::Context) {
                 }
                 "macros" => crate::macro_ui::macros_dialog(app, ui, &mut d, &mut open),
                 "recordMacro" => crate::macro_ui::record_dialog(app, ui, &mut d, &mut open),
+                crate::vba_view::DIALOG => crate::vba_view::view(app, ui, &mut d, &mut open),
                 "statistics" | "accessibility" | "errorChecking" | "evaluateFormula" | "comments" => {
                     let r = if d.name == "comments" {
                         app.session.active().and_then(|doc| doc.wb.active().map(|s| json!(s.comments.iter().map(|(c, m)| json!({"cell": c.a1(), "author": m.author, "text": m.text})).collect::<Vec<_>>())))

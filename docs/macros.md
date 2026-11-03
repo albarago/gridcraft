@@ -1,6 +1,6 @@
 # Macros
 
-> **Last updated:** 2026-11-03 · **Change:** minor (`vba.modules` and `vba.source` read a workbook's VBA modules and source, read-only, from the CLI, MCP and the control channel; earlier: a workbook's VBA source can be read without running it; possible VBA stomping is flagged, signed projects are reported as signed (not verified), and compiled code is not checked against the source; saving a signed workbook doesn't keep its signature part yet; earlier: a close that waits on the step editor's question runs in the editor's window, and a further close asked meanwhile waits for the answer or is refused; earlier: closing a workbook or quitting asks about the step editor's unsaved draft first; recording macros and the management commands; Record Macro takes a name, shortcut and description; the macro interface: Automate › Macros, the Macros and Record Macro dialogs, the step editor, shortcuts)
+> **Last updated:** 2026-11-03 · **Change:** minor (View Code in the Macros dialog shows a workbook's VBA modules and source, read only; earlier: `vba.modules` and `vba.source` read a workbook's VBA modules and source, read-only, from the CLI, MCP and the control channel; earlier: a workbook's VBA source can be read without running it; possible VBA stomping is flagged, signed projects are reported as signed (not verified), and compiled code is not checked against the source; saving a signed workbook doesn't keep its signature part yet; earlier: a close that waits on the step editor's question runs in the editor's window, and a further close asked meanwhile waits for the answer or is refused; earlier: closing a workbook or quitting asks about the step editor's unsaved draft first; recording macros and the management commands; Record Macro takes a name, shortcut and description; the macro interface: Automate › Macros, the Macros and Record Macro dialogs, the step editor, shortcuts)
 
 GridCraft macros are typed, declarative lists of commands, not VBA. Every step runs a GridCraft
 command (the same ids the ribbon, CLI and MCP use) or one of three bounded control steps. A macro
@@ -280,7 +280,18 @@ other macros open; a macro that was left out is not in the saved file.
   trusts them for the session. Run runs the selected macro on the selection or the selected
   script; Step Into, Edit and Create open the step editor; Delete asks first; Options sets a
   macro's shortcut letter and description. The dialog keeps the result of `view.macros`, as before
-  macros existed.
+  macros existed. A workbook with a VBA project also gets View Code (no project, no button).
+- **View Code** (Macros dialog › View Code). A resizable window that shows the VBA project read
+  only: its name, "signed (not verified)" when it carries a signature, the sentence that GridCraft
+  keeps the project when you save but does not run it, and a banner with what reading found (the
+  project's notes and the selected module's warnings, such as possible stomping). The modules are
+  listed on the left under Modules, Class Modules, Document Modules and Forms, sorted by name
+  ignoring case, with the first one selected; its source shows on the right with VBA colours. The
+  source can be selected and copied, but typing, paste, cut and delete change nothing, in the view
+  or the workbook. A module with no stored source says so. Up, Down, Home and End move through
+  the modules, Tab and Shift+Tab move between the list and the source, and a screen reader hears
+  each module as its name and kind and the source as "Source of" the module. It reads through
+  `vba.modules` and `vba.source`, and works the same in the web build.
 - **Step editor.** A resizable window that works on a draft and saves it with `macro.save`; in a
   narrow app window it is no larger than the window and its toolbar wraps onto a second row. The
   step list shows each step's number, a breakpoint dot in the gutter (click to set or clear), a
@@ -356,7 +367,8 @@ a VBA project lists no modules, and an unknown module is an error. The project i
 first request, never when the workbook opens. Neither command runs VBA or opens a dialog, and both
 leave the workbook, its undo history and its unsaved-changes flag unchanged. They work from the
 CLI (`gridcraft-cli run --in book.xlsm --cmd vba.modules`), MCP (`execute_command`) and the
-control channel (`engine.execute`). A view in the window arrives with VBA-1.6.
+control channel (`engine.execute`). In the window, Macros › View Code shows the same modules and
+source, read only (see [In the window](#in-the-window)). Editing VBA isn't possible.
 
 ```text
 {"command": "vba.modules", "params": {}}

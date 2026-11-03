@@ -1042,6 +1042,7 @@ impl Dialog {
             "macros" => crate::macro_ui::open_dialog(app, &params),
             "recordMacro" => return crate::macro_ui::open_record(app, &params),
             "macroEditor" => return crate::macro_editor::open(app, &params),
+            crate::vba_view::DIALOG => return crate::vba_view::open(app, &params),
             "statistics" => {
                 let mut d = Dialog::custom("statistics", "Workbook Statistics", json!({}));
                 d.result = app.session.run("review.workbookStatistics", json!({})).ok();
