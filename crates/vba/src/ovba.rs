@@ -73,6 +73,21 @@ pub fn decompress(input: &[u8], max_out: usize) -> Result<Vec<u8>, OvbaError> {
     Ok(out)
 }
 
+/// Whether `err`, returned by [`decompress`] for `input`, means the container is cut short rather
+/// than damaged: the chunk header named by [`OvbaError::InvalidChunk`] is missing a byte, or has a
+/// valid signature but declares a chunk reaching past the end of `input` (§2.4.1.1.5). Every other
+/// error, including a bad header signature or a chunk that decompresses past 4096 bytes, is
+/// damage.
+#[must_use]
+pub fn is_cut_short(input: &[u8], err: &OvbaError) -> bool {
+    let OvbaError::InvalidChunk { at } = *err else { return false };
+    let Some(header) = read_u16(input, at) else { return true };
+    if header & SIGNATURE_MASK != SIGNATURE_BITS {
+        return false;
+    }
+    let chunk_len = usize::from(header & SIZE_MASK).saturating_add(3);
+    at.saturating_add(chunk_len) > input.len()
+}
 /// Decompressing a CompressedChunk (§2.4.1.3.2). Returns the offset of the next chunk.
 fn decompress_chunk(input: &[u8], chunk_start: usize, out: &mut Vec<u8>, max_out: usize) -> Result<usize, OvbaError> {
     let bad_chunk = OvbaError::InvalidChunk { at: chunk_start };
