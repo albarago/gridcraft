@@ -369,7 +369,8 @@ pub fn open_dialog(app: &mut SheetApp, params: &Json) -> Dialog {
 }
 
 /// The Macros dialog's body: the name box and the list on the left, the buttons on the right, the
-/// description under them; Options… switches to the shortcut and description of one macro.
+/// description under them; Options… switches to the shortcut and description of one macro. A
+/// workbook with a VBA project gets a note and View Code ([`crate::vba_view`]).
 pub fn macros_dialog(app: &mut SheetApp, ui: &mut Ui, d: &mut Dialog, open: &mut bool) {
     // Its rows and the Options pane are the workbook's it opened on: another workbook becoming
     // active (an agent) closes it rather than run, delete or change a macro of the same name there.
@@ -509,6 +510,15 @@ pub fn macros_dialog(app: &mut SheetApp, ui: &mut Ui, d: &mut Dialog, open: &mut
         ui.label(
             egui::RichText::new("This workbook also has a VBA project. GridCraft keeps it when you save but does not run it.").color(t.text_dim),
         );
+        // Read the project's code, read only. This dialog waits behind View Code and comes back
+        // when it closes. Without a project there is nothing to view, so no button (Req 8.7).
+        if ui
+            .add(egui::Button::new(app.ui.language.tr("View Code")).min_size(vec2(100.0, 24.0)))
+            .on_hover_text(app.ui.language.tr("Read this workbook's VBA modules. Nothing runs."))
+            .clicked()
+        {
+            app.open_dialog(crate::vba_view::DIALOG, json!({}));
+        }
     }
     d.values.insert("name".into(), json!(name));
     d.values.insert("kind".into(), json!(kind.key()));

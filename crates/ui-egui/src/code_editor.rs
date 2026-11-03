@@ -1,7 +1,8 @@
 //! A small code editor: monospace text with syntax colours, Tab to indent, Enter that keeps the
 //! indentation, and a scroll area that follows the caret. It colours Python (for code in cells,
-//! where `xl()` reads the sheet) and LaTeX (for equation source); reached as
-//! `widgets::code_editor`. The tokenizer and the key edits are pure functions, tested below.
+//! where `xl()` reads the sheet), LaTeX (for equation source) and VBA (View Code, read only);
+//! reached as `widgets::code_editor`. The tokenizer and the key edits are pure functions, tested
+//! below.
 
 use std::ops::Range;
 
@@ -15,8 +16,12 @@ use crate::theme::{self, Syntax, Tokens};
 pub enum Lang {
     Python,
     Latex,
+    /// A workbook's VBA, coloured by the static keyword list in [`vba`].
+    Vba,
     Plain,
 }
+
+pub mod vba;
 
 /// A coloured span's kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,6 +79,7 @@ pub fn highlight(text: &str, lang: Lang) -> Vec<(Range<usize>, Token)> {
     match lang {
         Lang::Python => python(text),
         Lang::Latex => latex(text),
+        Lang::Vba => vba::highlight(text),
         Lang::Plain => Vec::new(),
     }
 }
@@ -608,6 +614,9 @@ pub struct FieldOptions<'a> {
     pub name: &'a str,
     /// A byte range underlined in the error colour (see [`underline`]).
     pub mark: Option<Range<usize>>,
+    /// The text can be selected and copied but not changed: typing, paste, cut, Enter, Tab and
+    /// the delete keys do nothing, and Tab moves the focus on as in any other widget.
+    pub read_only: bool,
 }
 
 impl FieldOptions<'_> {
@@ -624,6 +633,7 @@ impl FieldOptions<'_> {
             // strings unless the caller gives one.
             name: "Code Editor",
             mark: None,
+            read_only: false,
         }
     }
 }
@@ -650,7 +660,8 @@ pub fn code_field(ui: &mut Ui, id: egui::Id, text: &mut String, options: &FieldO
     // The input the editor handles itself (Enter with indentation, Tab, Shift+Tab), applied in
     // input order with the typing around it, before the text field sees the rest; what had to
     // wait for the field in the previous pass comes first.
-    let focused = options.interactive && ui.memory(|m| m.has_focus(id));
+    // A read-only field applies no edits of its own; the text field gets a buffer it can't change.
+    let focused = options.interactive && !options.read_only && ui.memory(|m| m.has_focus(id));
     let held = take_held(ui, id, focused);
     let mut edited = None;
     let mut stop = None;
@@ -693,10 +704,18 @@ pub fn code_field(ui: &mut Ui, id: egui::Id, text: &mut String, options: &FieldO
         }
         ui.fonts_mut(|f| f.layout_job(job))
     };
-    let filter = egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: options.keep_escape };
+    let filter = egui::EventFilter { tab: !options.read_only, horizontal_arrows: true, vertical_arrows: true, escape: options.keep_escape };
     let scrolled =
         egui::ScrollArea::vertical().id_salt(id.with("scroll")).max_height(options.max_height.max(1.0)).auto_shrink([false, true]).show(ui, |ui| {
-            let out = TextEdit::multiline(text)
+            // egui leaves a `&str` buffer as it is: the caret and selection still work, and Copy.
+            let mut fixed: &str;
+            let buffer: &mut dyn egui::TextBuffer = if options.read_only {
+                fixed = text.as_str();
+                &mut fixed
+            } else {
+                text
+            };
+            let out = TextEdit::multiline(buffer)
                 .id(id)
                 .font(font.clone())
                 .code_editor()
