@@ -2,3 +2,4 @@
 mod cli;
 mod sandbox;
 mod text_to_columns_quotes;
+mod vba;

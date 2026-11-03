@@ -24,6 +24,7 @@ pub mod slicer;
 pub mod solver;
 pub mod spelling;
 pub mod stash;
+pub mod vba;
 pub mod view;
 pub mod whatif;
 pub mod wordart;
@@ -182,6 +183,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(solver::specs());
         v.extend(pivot::specs());
         v.extend(python::specs());
+        v.extend(vba::specs());
         v.extend(slicer::specs());
         v.extend(whatif::specs());
         v.extend(forecast::specs());
