@@ -243,6 +243,13 @@ pub struct Workbook {
     /// copy of the workbook (every edit's undo step) doesn't copy it.
     #[serde(default, with = "crate::b64::opt")]
     pub vba_project: Option<Arc<Vec<u8>>>,
+    /// Whether the file's VBA project had a VBA signature part: a part the `vbaProject.bin`
+    /// relationships point at with a `vbaProjectSignature…` type ([MS-XLSX]). Set by the xlsx
+    /// reader so the macro view can say "signed (not verified)"; the signature is never read or
+    /// verified. State of the file as opened, not a setting: never saved (not in JSON, and the
+    /// xlsx writer doesn't write signature parts back, so a saved copy is unsigned).
+    #[serde(skip)]
+    pub vba_signature_part: bool,
     /// Field separator of the CSV this workbook was read from, so saving it as CSV writes the same
     /// separator back (a `;` file stays a `;` file). `None` = not read from CSV: CSV saves use `,`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -359,6 +366,7 @@ impl Workbook {
             cell_styles: vec![],
             phonetics: vec![],
             vba_project: None,
+            vba_signature_part: false,
             csv_delimiter: None,
             macros: crate::macros::Macros::default(),
             macros_read: vec![],

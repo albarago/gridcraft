@@ -1741,3 +1741,52 @@ fn remove_personal_information_is_kept_and_honoured() {
     assert_eq!(book.child("workbookPr").and_then(|p| p.attr("filterPrivacy")), None);
     assert!(String::from_utf8(pkg.read("docProps/core.xml").unwrap().unwrap()).unwrap().contains("Jane Example"));
 }
+
+/// A macro workbook whose `vbaProject.bin` has a relationship of type `rel_type` to a part.
+fn with_vba_signature(rel_type: &str, target_exists: bool) -> Vec<u8> {
+    let rels = format!(
+        r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{rel_type}" Target="vbaProjectSignature.bin"/></Relationships>"#
+    );
+    let mut parts = vec![("xl/vbaProject.bin", "opaque project"), ("xl/_rels/vbaProject.bin.rels", rels.as_str())];
+    if target_exists {
+        parts.push(("xl/vbaProjectSignature.bin", "opaque signature"));
+    }
+    super::minimal(
+        "<sheetData/>",
+        &parts,
+        r#"<Relationship Id="rId9" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/>"#,
+        "",
+    )
+}
+
+#[test]
+fn a_vba_signature_part_sets_the_flag() {
+    const NS: &str = "http://schemas.microsoft.com/office/2006/relationships/";
+    for kind in ["vbaProjectSignature", "vbaProjectSignatureAgile", "vbaProjectSignatureV3"] {
+        let (wb, _) = read_xlsx(&with_vba_signature(&format!("{NS}{kind}"), true)).unwrap();
+        assert!(wb.vba_signature_part, "{kind}");
+        assert_eq!(wb.vba_project.as_deref().map(Vec::as_slice), Some(&b"opaque project"[..]), "{kind}");
+    }
+    // A dangling relationship, an unrelated one, or no rels part at all: no signature part.
+    assert!(!read_xlsx(&with_vba_signature(&format!("{NS}vbaProjectSignature"), false)).unwrap().0.vba_signature_part);
+    assert!(!read_xlsx(&with_vba_signature(&format!("{NS}image"), true)).unwrap().0.vba_signature_part);
+    let mut wb = Workbook::new();
+    wb.vba_project = Some(b"opaque".to_vec().into());
+    let plain = crate::write_xlsx_as(&wb, crate::XlsxKind::MacroWorkbook).unwrap();
+    assert!(!read_xlsx(&plain).unwrap().0.vba_signature_part);
+}
+
+#[test]
+fn a_vba_signature_part_is_not_written_back() {
+    // Current behaviour, recorded for VBA-1.4: the signature part is detected but not kept, so a
+    // saved copy is unsigned. The project itself is written back byte for byte.
+    let (wb, _) = read_xlsx(&with_vba_signature("http://schemas.microsoft.com/office/2006/relationships/vbaProjectSignature", true)).unwrap();
+    let saved = crate::write_xlsx_as(&wb, crate::XlsxKind::MacroWorkbook).unwrap();
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(saved.clone())).unwrap();
+    let names: Vec<String> = (0..z.len()).map(|i| z.name_for_index(i).unwrap().to_string()).collect();
+    assert!(!names.iter().any(|n| n.to_ascii_lowercase().contains("signature")), "{names:?}");
+    let mut bin = vec![];
+    z.by_name("xl/vbaProject.bin").unwrap().read_to_end(&mut bin).unwrap();
+    assert_eq!(bin, b"opaque project");
+    assert!(!read_xlsx(&saved).unwrap().0.vba_signature_part);
+}
