@@ -239,7 +239,15 @@ mod tests {
             c("gridcraft-xlsx", &[("gridcraft-core", Normal, true), ("gridcraft-formula", Normal, true), ("gridcraft-model", Normal, true)]),
             c("gridcraft-vba", &[("gridcraft-core", Normal, true)]),
             c("gridcraft-chart", &[("gridcraft-model", Normal, true)]),
-            c("gridcraft-engine", &[("gridcraft-calc", Normal, true), ("gridcraft-xlsx", Normal, true), ("gridcraft-chart", Normal, true)]),
+            c(
+                "gridcraft-engine",
+                &[
+                    ("gridcraft-calc", Normal, true),
+                    ("gridcraft-xlsx", Normal, true),
+                    ("gridcraft-chart", Normal, true),
+                    ("gridcraft-vba", Normal, true),
+                ],
+            ),
             c("gridcraft-ui-egui", &[("gridcraft-engine", Normal, true), ("egui", Normal, false), ("wgpu", Normal, false)]),
             c("gridcraft-cli", &[("gridcraft-ui-egui", Normal, true), ("gridcraft-mcp", Normal, true)]),
         ];
