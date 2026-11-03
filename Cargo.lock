@@ -2224,6 +2224,7 @@ dependencies = [
 name = "gridcraft-engine"
 version = "0.19.1"
 dependencies = [
+ "craft-cfb",
  "craft-csv",
  "craft-gridcraft-format",
  "gridcraft-calc",
@@ -2235,6 +2236,7 @@ dependencies = [
  "gridcraft-model",
  "gridcraft-numfmt",
  "gridcraft-pdf",
+ "gridcraft-vba",
  "gridcraft-xlsx",
  "image",
  "log",

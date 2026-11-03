@@ -7,7 +7,7 @@ description = "GridCraft VBA projects: reads vbaProject.bin from the public [MS-
 [lints]
 workspace = true
 [features]
-# Fixture builders for other crates' tests (filled by later tasks). Off by default.
+# The Fixture_Builder (`fixture`) and the test-only compressor, for tests in other crates. Off by default.
 test-support = []
 [dependencies]
 gridcraft-core = { workspace = true }
