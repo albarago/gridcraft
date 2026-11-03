@@ -1,5 +1,5 @@
 //! Fixture_Builder projects read through the real compound file reader (Req 5.1).
-use gridcraft_vba::fixture::{Corruption, Fixture, FixtureModule};
+use gridcraft_vba::fixture::{ALL_DIAG_CODES, Corruption, Fixture, FixtureModule, SignatureKind, diag_fixture};
 use gridcraft_vba::{DiagCode, Limits, ModuleKind, StreamSource, VbaProject, read_project};
 use gridcraft_xlsx::Compound;
 
@@ -176,5 +176,139 @@ fn a_truncated_bin_never_panics() {
         if len < 512 {
             assert_eq!(codes(&p), [DiagCode::DirCorrupt], "{len} bytes");
         }
+    }
+}
+
+// --- Signatures (Req 7.4-7.6) ---
+
+const SIGNED: DiagCode = DiagCode::Signed;
+
+#[test]
+fn a_signature_stream_is_found_through_the_compound_file() {
+    // Only root streams: no project, but the root listing still sees the signature.
+    let cfb = gridcraft_xlsx::testing::compound_file(&[("\u{5}DigitalSignatureAgile", b"0\x82 never read"), ("PROJECT", b"ID=\"{}\"\r\n")]);
+    let p = read_vba_project(&cfb, &Limits::default());
+    assert!(p.signed);
+    assert_eq!(codes(&p), [DiagCode::DirMissing, SIGNED]);
+    assert!(!read_bin(&Fixture::new(four())).signed, "a fixture without signature streams is unsigned");
+}
+
+#[test]
+fn the_package_signature_flag_marks_the_workbook_signed() {
+    let mut wb = gridcraft_model::Workbook::new();
+    assert_eq!(super::read_workbook_vba(&wb, &Limits::default()), None, "no project, nothing read");
+    wb.vba_project = Some(bin(&Fixture::new(four())).into());
+    let unsigned = super::read_workbook_vba(&wb, &Limits::default()).unwrap();
+    assert!(!unsigned.signed);
+    assert!(!codes(&unsigned).contains(&SIGNED));
+    wb.vba_signature_part = true;
+    let signed = super::read_workbook_vba(&wb, &Limits::default()).unwrap();
+    assert!(signed.signed);
+    assert_eq!(signed.diagnostics.iter().filter(|d| d.code == SIGNED).count(), 1);
+    assert_eq!(summary(&signed), summary(&unsigned), "the modules are read the same");
+    // A bin with a signature stream as well still gives one diagnostic.
+    wb.vba_project = Some(gridcraft_xlsx::testing::compound_file(&[("\u{5}DigitalSignature", b"x")]).into());
+    let both = super::read_workbook_vba(&wb, &Limits::default()).unwrap();
+    assert_eq!(codes(&both), [DiagCode::DirMissing, SIGNED]);
+}
+
+/// The package with `add` parts added.
+fn with_parts(bytes: &[u8], add: &[(&str, &[u8])]) -> Vec<u8> {
+    use std::io::{Read, Write};
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for i in 0..z.len() {
+        let mut f = z.by_index(i).unwrap();
+        let name = f.name().to_string();
+        let mut data = Vec::new();
+        f.read_to_end(&mut data).unwrap();
+        out.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+        out.write_all(&data).unwrap();
+    }
+    for (name, data) in add {
+        out.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+        out.write_all(data).unwrap();
+    }
+    out.finish().unwrap().into_inner()
+}
+
+#[test]
+fn a_package_signature_part_is_reported_through_the_engine() {
+    let vba = bin(&Fixture::new(four()));
+    let mut wb = gridcraft_model::Workbook::new();
+    wb.vba_project = Some(vba.clone().into());
+    let xlsm = gridcraft_xlsx::write_xlsx_as(&wb, gridcraft_xlsx::XlsxKind::MacroWorkbook).unwrap();
+    let rels = br#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProjectSignature" Target="vbaProjectSignature.bin"/></Relationships>"#;
+    let signed = with_parts(&xlsm, &[("xl/_rels/vbaProject.bin.rels", rels), ("xl/vbaProjectSignature.bin", b"0\x82 opaque")]);
+    let (back, _) = gridcraft_xlsx::read_xlsx(&signed).unwrap();
+    assert!(back.vba_signature_part);
+    assert_eq!(back.vba_project.as_deref(), Some(&vba), "the bin is kept byte for byte");
+    let p = super::read_workbook_vba(&back, &Limits::default()).unwrap();
+    assert!(p.signed);
+    assert_eq!(codes(&p), [SIGNED]);
+    let (plain, _) = gridcraft_xlsx::read_xlsx(&xlsm).unwrap();
+    assert!(!super::read_workbook_vba(&plain, &Limits::default()).unwrap().signed);
+}
+
+// --- One fixture per diagnostic, signatures and P_Code regions (Req 10.6) ---
+
+/// The diagnostic codes on `module`, or on the project for `None`.
+fn codes_on(p: &VbaProject, module: Option<&str>) -> Vec<DiagCode> {
+    match module {
+        Some(name) => p.modules.iter().find(|m| m.name == name).map(|m| m.diagnostics.iter().map(|d| d.code).collect()).unwrap_or_default(),
+        None => p.diagnostics.iter().map(|d| d.code).collect(),
+    }
+}
+
+/// The bin half of `every_diagnostic_code_has_a_fixture` in the vba crate: each code's fixture,
+/// written as a `vbaProject.bin`, read through [`Compound`] and the adapter.
+#[test]
+fn every_diagnostic_code_has_a_fixture_through_the_compound_reader() {
+    for code in ALL_DIAG_CODES {
+        let d = diag_fixture(code);
+        let p = read_vba_project(&bin(&d.fixture), &d.limits);
+        assert!(codes_on(&p, d.module).contains(&code), "{code:?}: got {:?}", codes(&p));
+    }
+}
+
+#[test]
+fn signed_and_stomped_fixtures_read_the_same_through_the_compound_reader() {
+    let stomped = diag_fixture(DiagCode::PossibleStomping).fixture;
+    let signed = diag_fixture(DiagCode::Signed).fixture;
+    let both = Fixture { signatures: SignatureKind::ALL.to_vec(), ..stomped.clone() };
+    let cases = [
+        (&stomped, vec![DiagCode::PossibleStomping]),
+        (&signed, vec![SIGNED]),
+        (&both, vec![SIGNED, DiagCode::PossibleStomping]),
+        (&diag_fixture(DiagCode::CompiledCodeNotChecked).fixture, vec![DiagCode::CompiledCodeNotChecked]),
+    ];
+    for (f, want) in cases {
+        let p = read_bin(f);
+        assert_eq!(p, read_mem(f), "the bin and the MemSource disagree: {want:?}");
+        assert_eq!(codes(&p), want);
+        assert_eq!(p.signed, want.contains(&SIGNED));
+        assert_eq!(summary(&p), expected(f));
+    }
+    // The stomped module's P_Code region is what MODULEOFFSET skips.
+    let p = read_bin(&stomped);
+    assert_eq!(p.modules[0].text_offset as usize, stomped.modules[0].cache_prefix.len());
+    // Through the workbook too: a signature stream and a package part still give one diagnostic.
+    let mut wb = gridcraft_model::Workbook::new();
+    wb.vba_project = Some(bin(&both).into());
+    wb.vba_signature_part = true;
+    let p = super::read_workbook_vba(&wb, &Limits::default()).unwrap();
+    assert_eq!(codes(&p), [SIGNED, DiagCode::PossibleStomping]);
+}
+
+#[test]
+fn each_signature_stream_is_found_through_the_compound_reader() {
+    for kind in SignatureKind::ALL {
+        let f = Fixture { signatures: vec![kind], ..Fixture::new(four()) };
+        let b = bin(&f);
+        let src = CompoundSource(Compound::open(&b).unwrap());
+        assert!(src.children(&[]).unwrap().iter().any(|n| n == kind.stream_name()), "{kind:?}");
+        let p = read_vba_project(&b, &Limits::default());
+        assert!(p.signed, "{kind:?}");
+        assert_eq!(codes(&p), [SIGNED], "{kind:?}");
     }
 }

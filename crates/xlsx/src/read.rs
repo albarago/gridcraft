@@ -103,6 +103,23 @@ impl Ctx<'_> {
     }
 }
 
+/// Whether the VBA project part `vba_part` has a signature part: an internal relationship from
+/// it whose type's last segment starts with `vbaProjectSignature`, with the target part present.
+/// [MS-XLSB] "VBA Project Signature" documents
+/// `http://schemas.microsoft.com/office/2006/relationships/vbaProjectSignature`; the later
+/// signature versions (`…Agile`, `…V3`) follow the same pattern, so the prefix match (ignoring
+/// case) counts every version. Only the relationships are read, never the signature, and
+/// nothing is kept: the writer doesn't write signature parts back. Unreadable relationships count
+/// as no signature; only size limits are errors.
+fn vba_signature_part(pkg: &mut Package<'_>, vba_part: &str) -> Result<bool, IoError> {
+    let rels = match pkg.rels(vba_part) {
+        Ok(rels) => rels,
+        Err(IoError::TooLarge(m)) => return Err(IoError::TooLarge(m)),
+        Err(_) => return Ok(false),
+    };
+    Ok(rels.iter().any(|r| !r.external && r.kind.get(..19).is_some_and(|k| k.eq_ignore_ascii_case("vbaProjectSignature")) && pkg.has(&r.target)))
+}
+
 pub fn find_rel<'r>(rels: &'r [Rel], kind: &str) -> Option<&'r Rel> {
     rels.iter().find(|r| r.kind == kind)
 }
@@ -445,6 +462,7 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], known_function: Option<&'a dyn Fn(&str) ->
         match cx.pkg.read(&r.target) {
             Ok(Some(data)) => {
                 wb.vba_project = Some(data.into());
+                wb.vba_signature_part = vba_signature_part(&mut cx.pkg, &r.target)?;
                 cx.warn("macros (VBA project) were kept but not executed");
             }
             Ok(None) => cx.warn("macros (VBA project) reference a missing part and were dropped"),
