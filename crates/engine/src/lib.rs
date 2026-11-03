@@ -25,6 +25,7 @@ pub mod record;
 pub mod sample;
 pub mod selection;
 pub mod tables;
+mod vba_cache;
 mod vba_source;
 pub mod windows;
 
@@ -532,6 +533,8 @@ pub struct Session {
     /// Measures cell text for AutoFit Column Width. Without it (CLI, MCP) AutoFit uses
     /// [`cmd::format::approx_text_width`].
     pub text_width: Option<TextWidth>,
+    /// Parsed VBA projects, read on the first request ([`vba_cache`]); never filled on open.
+    pub(crate) vba_cache: vba_cache::VbaCache,
 }
 
 impl Session {
