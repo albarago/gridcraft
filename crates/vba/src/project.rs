@@ -11,6 +11,25 @@
 //!    before any trailing 0x00 bytes (a short raw last chunk's padding, §2.4.1.3.10) and
 //!    decoded in the project code page. A failure leaves that module listed with empty source
 //!    and a diagnostic; the other modules are still read (Req 5.9).
+//! 4. A module that was read, has compiled code before its MODULEOFFSET and whose source is only
+//!    blank and `Attribute` lines gets a `PossibleStomping` diagnostic (Req 7.1, see
+//!    `possible_stomping`). Any other module that was read and has compiled code gets a
+//!    `CompiledCodeNotChecked` diagnostic (Req 7.3), because the compiled code is never decoded
+//!    and the identifier comparison of Req 7.2 is not implemented (see the crate docs). A
+//!    stomped module gets only `PossibleStomping`: it is the stronger statement, and adding
+//!    "not checked" would only repeat that the compiled code wasn't read. A module with no
+//!    compiled code (`text_offset == 0`) has nothing to check, and a module whose source couldn't
+//!    be read gets only its read diagnostic.
+//! 5. The project root is listed with [`StreamSource::children`]. A stream named
+//!    `\u{5}DigitalSignature`, `\u{5}DigitalSignatureEx` or `\u{5}DigitalSignatureAgile`
+//!    ([`SIGNATURE_STREAMS`]) marks the project signed, with one `Signed` diagnostic (Req 7.4,
+//!    see [`mark_signed`]). Only the names are looked at: the signature streams are never read,
+//!    parsed or verified, so the status is "signed (not verified)" (Req 7.7-7.8). This step runs
+//!    even when `VBA/dir` can't be read, so a damaged project is still reported as signed. If the
+//!    root can't be listed, the project is treated as unsigned and no diagnostic is added: the
+//!    signature check is advisory, and a root that can't be listed already breaks the reads above,
+//!    which report their own diagnostics. A VBA signature part in the workbook package (Req 7.5)
+//!    isn't visible here; the caller that sees the package calls [`mark_signed`] for it.
 //!
 //! Limits ([`Limits`]): at most 1,024 modules (Req 5.10), at most 64 MiB of decoded source in
 //! total (Req 5.11), and at most 16 MiB per decompressed stream. [`read_project`] never fails and
@@ -88,7 +107,8 @@ pub struct VbaProject {
     pub references: Vec<Reference>,
     /// The modules in `dir` stream order.
     pub modules: Vec<VbaModule>,
-    /// Whether the project carries a signature. Always false until signatures are detected.
+    /// Whether the project carries a signature (a signature stream, or a package signature part
+    /// reported through [`mark_signed`]). Never verified: "signed (not verified)".
     pub signed: bool,
     /// Workbook-level diagnostics.
     pub diagnostics: Vec<Diag>,
@@ -120,9 +140,44 @@ pub struct VbaModule {
     pub diagnostics: Vec<Diag>,
 }
 
+/// Names of the VBA signature streams in the project root. Each starts with U+0005 and compares
+/// case-insensitively, like every compound file name. The signature inside is the PKCS #7
+/// structure of [MS-OSHARED] §2.3.2; GridCraft never reads it.
+///
+/// [MS-OSHARED]: https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-oshared/
+pub const SIGNATURE_STREAMS: [&str; 3] = ["\u{5}DigitalSignature", "\u{5}DigitalSignatureEx", "\u{5}DigitalSignatureAgile"];
+
+/// The message of the `Signed` diagnostic.
+const SIGNED_MESSAGE: &str = "The VBA project is signed. GridCraft doesn't verify signatures (signed, not verified).";
+
 /// Reads a VBA project. Never fails: problems become diagnostics (see the module docs).
 #[must_use]
 pub fn read_project(src: &dyn StreamSource, limits: &Limits) -> VbaProject {
+    let mut project = read_contents(src, limits);
+    if has_signature_stream(src) {
+        mark_signed(&mut project);
+    }
+    project
+}
+
+/// Marks `project` "signed (not verified)": sets [`VbaProject::signed`] and adds one
+/// project-level `Signed` diagnostic. Calling it again changes nothing, so a project with both a
+/// signature stream and a package signature part (Req 7.4-7.5) gets one diagnostic.
+pub fn mark_signed(project: &mut VbaProject) {
+    project.signed = true;
+    if !project.diagnostics.iter().any(|d| d.code == DiagCode::Signed) {
+        project.diagnostics.push(Diag::project(DiagCode::Signed, SIGNED_MESSAGE));
+    }
+}
+
+/// Whether the project root lists a signature stream. Only names are compared; no stream is read.
+/// A root that can't be listed counts as unsigned (see the module docs).
+fn has_signature_stream(src: &dyn StreamSource) -> bool {
+    src.children(&[]).is_ok_and(|names| names.iter().any(|n| SIGNATURE_STREAMS.iter().any(|s| s.eq_ignore_ascii_case(n))))
+}
+
+/// Steps 1-4 of the module docs: the `dir` stream, the `PROJECT` stream and the modules.
+fn read_contents(src: &dyn StreamSource, limits: &Limits) -> VbaProject {
     let mut project = VbaProject::default();
     let info = match read_dir(src, limits) {
         Ok(info) => info,
@@ -233,7 +288,26 @@ fn read_module(src: &dyn StreamSource, limits: &Limits, code_page: u16, kinds: O
         ));
     }
     let source = match module_source(src, limits, code_page, &stream_name, m.text_offset) {
-        Ok(source) => source,
+        Ok(source) => {
+            if possible_stomping(m.text_offset, &source) {
+                diagnostics.push(Diag::module(
+                    DiagCode::PossibleStomping,
+                    &name,
+                    format!(
+                        "Module \"{name}\" has compiled code but no source to match it. The source may have been removed to hide what the macro does (VBA stomping)."
+                    ),
+                ));
+            } else if m.text_offset > 0 {
+                diagnostics.push(Diag::module(
+                    DiagCode::CompiledCodeNotChecked,
+                    &name,
+                    format!(
+                        "Module \"{name}\" also holds compiled code. GridCraft doesn't read compiled code, so it can't confirm the source matches it."
+                    ),
+                ));
+            }
+            source
+        }
         Err((code, why)) => {
             diagnostics.push(Diag::module(code, &name, format!("The source of module \"{name}\" couldn't be read: {why}.")));
             String::new()
@@ -260,6 +334,39 @@ fn module_source(src: &dyn StreamSource, limits: &Limits, code_page: u16, stream
     // padding ([MS-OVBA] §2.4.1.3.10). Source text never holds NUL, so trailing NULs are padding.
     let end = decompressed.iter().rposition(|&b| b != 0).map_or(0, |i| i.saturating_add(1));
     Ok(mbcs(code_page, decompressed.get(..end).unwrap_or_default()))
+}
+
+/// Whether a module that was read looks stomped (Req 7.1).
+///
+/// VBA stomping removes or replaces a module's source while keeping its compiled code (P_Code),
+/// which Office runs when the VBA version matches, so the code that runs is not the code shown.
+/// Two facts are enough to spot the plain form without decoding anything:
+///
+/// - `text_offset > 0`: the module stream holds bytes before MODULEOFFSET, which is where
+///   [MS-OVBA] §2.3.4.3 puts the compiled-code cache. The caller only asks once the source has
+///   been read, so MODULEOFFSET is inside the stream and those bytes really exist. A module with
+///   `text_offset == 0` has nothing compiled to hide, so an empty source there is just an empty
+///   module.
+/// - the source is empty in substance: every line, trimmed, is blank or an `Attribute`
+///   statement. Those lines are written by the VBA editor itself (`Attribute VB_Name = …`), so
+///   a module that has compiled code and nothing else has lost the code the user wrote.
+///
+/// This is the reliable, clean-room check: the P_Code bytes are only counted (through
+/// MODULEOFFSET), never decoded, so no undocumented format is involved and a valid module is
+/// never flagged for what its compiled code holds. A comment line counts as source, so a module
+/// whose only line is a comment is not flagged: comments are what a user writes, and flagging
+/// them would turn the check into a guess about intent. Replacing the source with different
+/// code is not caught here; that needs the P_Code identifier comparison of Req 7.2.
+fn possible_stomping(text_offset: u32, source: &str) -> bool {
+    text_offset > 0 && source.split(['\r', '\n']).map(str::trim).all(|line| line.is_empty() || is_attribute_line(line))
+}
+
+/// Whether a trimmed line is a VBA `Attribute` statement: the keyword, case-insensitively, then
+/// a space or tab.
+fn is_attribute_line(line: &str) -> bool {
+    const KEYWORD: &str = "attribute";
+    line.get(..KEYWORD.len()).is_some_and(|word| word.eq_ignore_ascii_case(KEYWORD))
+        && line.as_bytes().get(KEYWORD.len()).is_some_and(|&b| b == b' ' || b == b'\t')
 }
 
 /// MBCS text in the project code page. An unsupported code page is reported once, by the caller.

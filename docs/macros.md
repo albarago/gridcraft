@@ -1,6 +1,6 @@
 # Macros
 
-> **Last updated:** 2026-11-02 · **Change:** minor (form buttons run macros, `macro.run` takes `output`, and a button action kept in a hidden name comes back on reopen only while the file still agrees with it; earlier: a close that waits on the step editor's question runs in the editor's window, and a further close asked meanwhile waits for the answer or is refused; earlier: closing a workbook or quitting asks about the step editor's unsaved draft first; recording macros and the management commands; Record Macro takes a name, shortcut and description; the macro interface: Automate › Macros, the Macros and Record Macro dialogs, the step editor, shortcuts)
+> **Last updated:** 2026-11-03 · **Change:** minor (a workbook's VBA source can be read without running it; possible VBA stomping is flagged, signed projects are reported as signed (not verified), and compiled code is not checked against the source; saving a signed workbook doesn't keep its signature part yet; earlier: form buttons run macros, `macro.run` takes `output`, and a button action kept in a hidden name comes back on reopen only while the file still agrees with it; earlier: a close that waits on the step editor's question runs in the editor's window, and a further close asked meanwhile waits for the answer or is refused; earlier: closing a workbook or quitting asks about the step editor's unsaved draft first; recording macros and the management commands; Record Macro takes a name, shortcut and description; the macro interface: Automate › Macros, the Macros and Record Macro dialogs, the step editor, shortcuts)
 
 GridCraft macros are typed, declarative lists of commands, not VBA. Every step runs a GridCraft
 command (the same ids the ribbon, CLI and MCP use) or one of three bounded control steps. A macro
@@ -371,3 +371,16 @@ recorded. A workbook can hold a script and a macro with the same name.
 
 A VBA project in an `.xlsm` or `.xltm` file is preserved on save and never run. GridCraft macros
 are stored apart from it.
+
+GridCraft can read a VBA project's source without running it. The reader follows the public
+[MS-OVBA] format and lists each module with its name, kind and source. Nothing in the window or
+the commands shows that source yet; a read-only view comes later. While reading, it flags a module
+that holds compiled code but no source beyond `Attribute` lines as possible VBA stomping, where the
+source may have been removed to hide what the macro does. It reports a project that carries a
+signature as "signed (not verified)": the signature is found, never checked. It doesn't check
+compiled code against the source, because the compiled code's layout isn't publicly documented. Any
+other module that holds compiled code is reported as not checked, and source replaced with different
+code is not detected. Saving a signed workbook doesn't keep the package's signature part today, so
+the saved `.xlsm` or `.xltm` is unsigned.
+
+[MS-OVBA]: https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-ovba/
