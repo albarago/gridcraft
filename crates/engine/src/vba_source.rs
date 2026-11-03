@@ -2,10 +2,14 @@
 //! Decision 1): `gridcraft-vba` never parses CFB itself, it reads streams through
 //! [`gridcraft_vba::StreamSource`]. [`CompoundSource`] implements that trait over
 //! [`craft_cfb::CompoundFile`], and [`read_vba_project`] reads a whole `vbaProject.bin`.
+//! [`read_workbook_vba`] reads a workbook's project and adds what only the package knows: a VBA
+//! signature part (`Workbook::vba_signature_part`, Req 7.5) marks the project "signed (not
+//! verified)" as a signature stream in the bin does (Req 7.4), with one `Signed` diagnostic.
 //!
 //! Nothing here runs on open; the VBA cache (VBA-1.5) calls it on the first request.
 use craft_cfb::{CompoundFile, EntryKind};
-use gridcraft_vba::{Diag, DiagCode, Limits, StreamSource, VbaProject, read_project};
+use gridcraft_model::Workbook;
+use gridcraft_vba::{Diag, DiagCode, Limits, StreamSource, VbaProject, mark_signed, read_project};
 
 /// The most storages a path may go through: a VBA project's own paths are two names deep
 /// (`VBA/dir`), so a longer one is a mistake or a hostile caller, and is refused.
@@ -75,6 +79,18 @@ pub(crate) fn read_vba_project(bytes: &[u8], limits: &Limits) -> VbaProject {
     }
 }
 
+/// Reads `wb`'s VBA project, or `None` when it has none. A VBA signature part in the package
+/// marks the project signed even when the bin has no signature stream; both together still give
+/// one `Signed` diagnostic. Nothing is verified.
+#[cfg_attr(not(test), expect(dead_code, reason = "used by the VBA cache in VBA-1.5"))]
+pub(crate) fn read_workbook_vba(wb: &Workbook, limits: &Limits) -> Option<VbaProject> {
+    let bytes = wb.vba_project.as_deref()?;
+    let mut project = read_vba_project(bytes, limits);
+    if wb.vba_signature_part {
+        mark_signed(&mut project);
+    }
+    Some(project)
+}
 #[cfg(test)]
 mod props;
 #[cfg(test)]

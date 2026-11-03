@@ -91,7 +91,7 @@ fn source_starts_at_module_offset() {
     let p = read_project(&source(&dir, Some(project_text(&[("Module", "Module1")])), &[("Module1", stream)]), &Limits::default());
     assert_eq!(p.modules[0].source, "Sub A()\r\nEnd Sub\r\n");
     assert_eq!(p.modules[0].text_offset, 7);
-    assert_eq!(p.modules[0].diagnostics, vec![]);
+    assert_eq!(codes(&p.modules[0].diagnostics), [DiagCode::CompiledCodeNotChecked]);
 }
 
 #[test]
@@ -288,4 +288,211 @@ fn mem_source_lists_children_case_insensitively() {
     assert!(src.stream(&["vba", "DIR"]).unwrap().is_some());
     assert!(src.stream(&["VBA", "nope"]).unwrap().is_none());
     assert!(src.children(&["Broken"]).is_err() && src.stream(&["Broken"]).is_err());
+}
+
+// ---------------------------------------------------------------- possible stomping (Req 7.1)
+
+/// A standard module `Module1` with `prefix` bytes of compiled-code cache before `source`.
+fn stomp_fixture(prefix: usize, source: &str) -> crate::fixture::Fixture {
+    let mut m = crate::fixture::FixtureModule::new("Module1", ModuleKind::Standard, source);
+    m.cache_prefix = vec![0x5A; prefix];
+    crate::fixture::Fixture::new(vec![m])
+}
+
+fn read_stomp(f: &crate::fixture::Fixture) -> VbaModule {
+    let p = read_project(&f.to_streams(), &Limits::default());
+    assert!(p.diagnostics.is_empty(), "{p:#?}");
+    p.modules.into_iter().next().unwrap_or_else(|| panic!("no module"))
+}
+
+#[test]
+fn cache_prefix_with_empty_source_is_possible_stomping() {
+    let m = read_stomp(&stomp_fixture(64, ""));
+    assert_eq!(m.text_offset, 64);
+    assert_eq!(codes(&m.diagnostics), [DiagCode::PossibleStomping]);
+    assert_eq!(m.diagnostics[0].module.as_deref(), Some("Module1"));
+    assert!(m.diagnostics[0].message.contains("\"Module1\"") && m.diagnostics[0].message.contains("stomping"));
+}
+
+#[test]
+fn cache_prefix_with_only_attribute_and_blank_lines_is_possible_stomping() {
+    let source = "Attribute VB_Name = \"Module1\"\r\n\r\n   \t\r\n  attribute VB_GlobalNameSpace = False\r\nATTRIBUTE\tVB_Exposed = False\n\r\n";
+    let m = read_stomp(&stomp_fixture(1, source));
+    assert_eq!(m.source, source);
+    assert_eq!(codes(&m.diagnostics), [DiagCode::PossibleStomping]);
+}
+
+/// Real code next to a cache is not stomping, but the cache isn't checked against it (Req 7.3).
+#[test]
+fn cache_prefix_with_real_code_is_compiled_code_not_checked() {
+    let m = read_stomp(&stomp_fixture(64, "Attribute VB_Name = \"Module1\"\r\nSub A()\r\nEnd Sub\r\n"));
+    assert_eq!(codes(&m.diagnostics), [DiagCode::CompiledCodeNotChecked]);
+    assert_eq!(m.diagnostics[0].module.as_deref(), Some("Module1"));
+    assert!(m.diagnostics[0].message.contains("\"Module1\"") && m.diagnostics[0].message.contains("compiled code"));
+    // A word that only starts with "Attribute" is code, not an attribute statement.
+    let m = read_stomp(&stomp_fixture(64, "AttributeSet = 1\r\n"));
+    assert_eq!(codes(&m.diagnostics), [DiagCode::CompiledCodeNotChecked]);
+}
+
+/// A stomped module gets only the stronger `PossibleStomping`.
+#[test]
+fn stomped_module_is_not_also_compiled_code_not_checked() {
+    for source in ["", "Attribute VB_Name = \"Module1\"\r\n"] {
+        let m = read_stomp(&stomp_fixture(64, source));
+        assert_eq!(codes(&m.diagnostics), [DiagCode::PossibleStomping], "source {source:?}");
+    }
+}
+
+/// Only modules with a cache get the diagnostic, each naming itself.
+#[test]
+fn compiled_code_not_checked_only_for_modules_with_a_cache() {
+    use crate::fixture::{Fixture, FixtureModule};
+    let mut cached = FixtureModule::new("Cached", ModuleKind::Class, "Public X As Long\r\n");
+    cached.cache_prefix = vec![1; 300];
+    let plain = FixtureModule::new("Plain", ModuleKind::Standard, "Sub A()\r\nEnd Sub\r\n");
+    let p = read_project(&Fixture::new(vec![plain, cached]).to_streams(), &Limits::default());
+    assert!(p.diagnostics.is_empty(), "{p:#?}");
+    assert_eq!(p.modules[0].diagnostics, vec![]);
+    assert_eq!(codes(&p.modules[1].diagnostics), [DiagCode::CompiledCodeNotChecked]);
+    assert_eq!(p.modules[1].diagnostics[0].module.as_deref(), Some("Cached"));
+}
+
+#[test]
+fn no_cache_prefix_with_empty_source_is_not_flagged() {
+    for source in ["", "Attribute VB_Name = \"Module1\"\r\n"] {
+        let m = read_stomp(&stomp_fixture(0, source));
+        assert_eq!((m.text_offset, m.diagnostics.clone()), (0, vec![]), "source {source:?}");
+    }
+}
+
+/// A comment is source the user wrote, so a module holding only a comment is not flagged.
+#[test]
+fn cache_prefix_with_a_comment_line_is_not_flagged() {
+    let m = read_stomp(&stomp_fixture(64, "Attribute VB_Name = \"Module1\"\r\n' just a note\r\n"));
+    assert_eq!(codes(&m.diagnostics), [DiagCode::CompiledCodeNotChecked]);
+}
+
+/// A module whose source couldn't be read gets only its read diagnostic: neither
+/// `PossibleStomping` nor `CompiledCodeNotChecked`, whatever its source would have been.
+#[test]
+fn failed_module_stream_is_not_flagged() {
+    use crate::fixture::Corruption;
+    let path = vec!["VBA".to_owned(), "Module1".to_owned()];
+    let cases = [
+        (Corruption::TruncateStream { path: path.clone(), keep: 66 }, DiagCode::ModuleTruncated),
+        (Corruption::OffsetPastEnd { module: "Module1".to_owned() }, DiagCode::ModuleOffsetOutOfRange),
+        (Corruption::OversizedLength { path }, DiagCode::ModuleCorrupt),
+    ];
+    let attributes = "Attribute VB_Name = \"Module1\"\r\n";
+    let code = "Attribute VB_Name = \"Module1\"\r\nSub A()\r\nEnd Sub\r\n";
+    for source in [attributes, code] {
+        for (corruption, expected) in cases.clone() {
+            let mut f = stomp_fixture(64, source);
+            f.corrupt.push(corruption.clone());
+            let m = read_stomp(&f);
+            assert_eq!(m.source, "");
+            assert_eq!(codes(&m.diagnostics), [expected], "{corruption:?}, source {source:?}");
+        }
+    }
+    // A stream that is missing altogether.
+    let mut src = stomp_fixture(64, attributes).to_streams();
+    src.remove(&["VBA", "Module1"]);
+    let p = read_project(&src, &Limits::default());
+    assert_eq!(codes(&p.modules[0].diagnostics), [DiagCode::ModuleStreamMissing]);
+}
+
+// --- Signatures (Req 7.4, 7.6-7.8) ---
+
+fn signed_diags(p: &VbaProject) -> usize {
+    p.diagnostics.iter().filter(|d| d.code == DiagCode::Signed && d.module.is_none()).count()
+}
+
+#[test]
+fn each_signature_stream_marks_the_project_signed() {
+    let (dir, project, streams) = happy();
+    for name in super::SIGNATURE_STREAMS.iter().copied().chain(["\u{5}digitalsignatureAGILE"]) {
+        let src = source(&dir, Some(project.clone()), &streams).with(&[name], vec![0x30, 0x82]);
+        let p = read_project(&src, &Limits::default());
+        assert!(p.signed, "{name:?}");
+        assert_eq!(codes(&p.diagnostics), [DiagCode::Signed], "{name:?}");
+        assert_eq!(p.diagnostics[0].message, "The VBA project is signed. GridCraft doesn't verify signatures (signed, not verified).");
+        assert_eq!(p.modules.len(), 3, "a signature doesn't stop the modules being listed");
+    }
+}
+
+#[test]
+fn no_signature_stream_means_unsigned() {
+    let (dir, project, streams) = happy();
+    // Names that only look like signature streams don't count.
+    let src = source(&dir, Some(project), &streams).with(&["DigitalSignature"], vec![1]).with(&["VBA", "\u{5}DigitalSignature"], vec![1]);
+    let p = read_project(&src, &Limits::default());
+    assert!(!p.signed);
+    assert_eq!(signed_diags(&p), 0);
+}
+
+#[test]
+fn a_root_that_cant_be_listed_counts_as_unsigned() {
+    let (dir, project, streams) = happy();
+    let src = source(&dir, Some(project), &streams).with(&["\u{5}DigitalSignature"], vec![1]).failing(&[]);
+    let p = read_project(&src, &Limits::default());
+    assert!(!p.signed);
+    assert_eq!(p.diagnostics, vec![], "no diagnostic for the failed listing");
+    assert_eq!(p.modules.len(), 3);
+}
+
+#[test]
+fn a_damaged_project_is_still_reported_signed() {
+    let src = MemSource::new().with(&["\u{5}DigitalSignatureEx"], vec![1]);
+    let p = read_project(&src, &Limits::default());
+    assert!(p.signed);
+    assert_eq!(codes(&p.diagnostics), [DiagCode::DirMissing, DiagCode::Signed]);
+}
+
+/// A [`StreamSource`] that records every `stream` path it is asked for.
+struct Spy {
+    inner: MemSource,
+    reads: std::cell::RefCell<Vec<Vec<String>>>,
+}
+
+impl StreamSource for Spy {
+    fn stream(&self, path: &[&str]) -> Result<Option<Vec<u8>>, String> {
+        self.reads.borrow_mut().push(path.iter().map(|s| (*s).to_owned()).collect());
+        self.inner.stream(path)
+    }
+    fn children(&self, path: &[&str]) -> Result<Vec<String>, String> {
+        self.inner.children(path)
+    }
+}
+
+#[test]
+fn signature_streams_are_never_read() {
+    let (dir, project, streams) = happy();
+    // The signature stream can't even be read: the project is still signed.
+    let failing = source(&dir, Some(project.clone()), &streams).with(&["\u{5}DigitalSignature"], vec![1]).failing(&["\u{5}DigitalSignature"]);
+    let p = read_project(&failing, &Limits::default());
+    assert!(p.signed);
+    assert_eq!(codes(&p.diagnostics), [DiagCode::Signed]);
+    // And no signature stream is asked for.
+    let mut inner = source(&dir, Some(project), &streams);
+    for name in super::SIGNATURE_STREAMS {
+        inner.insert(&[name], vec![1]);
+    }
+    let spy = Spy { inner, reads: std::cell::RefCell::default() };
+    assert!(read_project(&spy, &Limits::default()).signed);
+    let reads = spy.reads.borrow();
+    assert!(!reads.is_empty());
+    assert!(reads.iter().all(|r| r.iter().all(|n| !n.starts_with('\u{5}'))), "{reads:?}");
+}
+
+#[test]
+fn mark_signed_adds_one_diagnostic() {
+    let src = MemSource::new().with(&["\u{5}DigitalSignature"], vec![1]);
+    let mut p = read_project(&src, &Limits::default());
+    super::mark_signed(&mut p);
+    assert!(p.signed);
+    assert_eq!(signed_diags(&p), 1, "a package signature part on top of a stream adds nothing");
+    let mut unsigned = VbaProject::default();
+    super::mark_signed(&mut unsigned);
+    assert!(unsigned.signed);
+    assert_eq!(codes(&unsigned.diagnostics), [DiagCode::Signed]);
 }

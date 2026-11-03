@@ -528,7 +528,12 @@ fn damage(case: &P4Case) -> Damage {
                 }
                 (path, true)
             }
-            Corruption::OversizedLength { path } | Corruption::CyclicChain { path } => (path, false),
+            // A removed stream reads as missing: a damaged stream, like an unreadable one.
+            Corruption::OversizedLength { path } | Corruption::CyclicChain { path } | Corruption::RemoveStream { path } => (path, false),
+            Corruption::PadProjectStream => {
+                d.project = true;
+                continue;
+            }
         };
         if same_path(path, &["VBA", "dir"]) {
             d.dir = true;

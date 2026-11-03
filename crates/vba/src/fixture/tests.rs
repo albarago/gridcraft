@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 
 use super::cfb::{self, CfbError, Damage, StreamSpec};
-use super::{Corruption, Fixture, FixtureModule, encode, vba_project_header};
+use super::{
+    ALL_DIAG_CODES, Corruption, DIAG_MODULE, Fixture, FixtureModule, MAX_PCODE, PCODE_PLACEHOLDER, SIGNATURE_PLACEHOLDER, SignatureKind,
+    diag_fixture, encode, vba_project_header,
+};
 use crate::diag::DiagCode;
 use crate::encoding::{CP_MAC_ROMAN, CP_UTF8, CP_WINDOWS_1252};
 use crate::project::{Limits, MemSource, StreamSource, VbaProject, read_project};
@@ -87,7 +90,9 @@ fn cache_prefix_moves_the_module_offset() {
     let p = read(&f.to_streams());
     assert_eq!(p.modules[0].text_offset, 37);
     assert_eq!(summary(&p), expected(&f));
-    assert!(p.modules[0].diagnostics.is_empty(), "{:?}", p.modules[0].diagnostics);
+    // A cache next to real code is reported as not checked (Req 7.3).
+    let codes: Vec<DiagCode> = p.modules[0].diagnostics.iter().map(|d| d.code).collect();
+    assert_eq!(codes, [DiagCode::CompiledCodeNotChecked]);
 }
 
 #[test]
@@ -294,7 +299,13 @@ fn the_bin_holds_the_same_streams_as_the_mem_source() {
         ],
         ..Fixture::new(modules.clone())
     };
-    for f in [Fixture::default(), Fixture::new(four()), Fixture::new(modules), truncated] {
+    // Signature streams (U+0005 names) in the root, a P_Code region and a removed stream.
+    let signed = Fixture {
+        signatures: SignatureKind::ALL.to_vec(),
+        corrupt: vec![Corruption::RemoveStream { path: path(&["VBA", "Class1"]) }],
+        ..Fixture::new(vec![four()[0].clone().with_pcode(300), four()[1].clone()])
+    };
+    for f in [Fixture::default(), Fixture::new(four()), Fixture::new(modules), truncated, signed] {
         let bin = f.to_vba_project_bin().unwrap();
         assert_eq!(bin[..8], [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]);
         assert_eq!(bin.len() % 512, 0);
@@ -381,4 +392,112 @@ fn siblings_are_in_cfb_order() {
         i = link(i as usize, 72);
     }
     assert_eq!(order, ["A", "aa", "bb", "ccc"]);
+}
+
+// ---- P_Code regions, signature streams and one fixture per diagnostic (Req 10.6) ----
+
+#[test]
+fn with_pcode_fills_a_deterministic_placeholder_region() {
+    let m = || FixtureModule::new("Module1", ModuleKind::Standard, "Sub C()\r\nEnd Sub\r\n");
+    for len in [0, 1, PCODE_PLACEHOLDER.len(), 1000] {
+        let a = m().with_pcode(len);
+        assert_eq!(a.cache_prefix.len(), len);
+        assert_eq!(a, m().with_pcode(len), "the same length gives the same bytes");
+        assert!(a.cache_prefix.iter().zip(PCODE_PLACEHOLDER.iter().cycle()).all(|(x, y)| x == y));
+        // The region is what MODULEOFFSET skips; the source still reads.
+        let f = Fixture::new(vec![a]);
+        let p = read(&f.to_streams());
+        assert_eq!(p.modules[0].text_offset as usize, len);
+        assert_eq!(summary(&p), expected(&f));
+    }
+    assert_eq!(m().with_pcode(10).with_pcode(0).cache_prefix, Vec::<u8>::new());
+    assert_eq!(m().with_cache(vec![1, 2, 3]).cache_prefix, [1, 2, 3]);
+    assert_eq!(MAX_PCODE, crate::ovba::MAX_DECOMPRESSED);
+}
+
+#[test]
+fn signature_kinds_name_the_signature_streams() {
+    assert_eq!(SignatureKind::ALL.map(SignatureKind::stream_name), crate::project::SIGNATURE_STREAMS);
+    assert!(SignatureKind::ALL.iter().all(|k| k.stream_name().starts_with('\u{5}')));
+}
+
+#[test]
+fn signature_streams_are_root_streams_with_placeholder_bytes() {
+    for kinds in [vec![SignatureKind::Legacy], vec![SignatureKind::Ex], vec![SignatureKind::Agile], SignatureKind::ALL.to_vec()] {
+        // A kind listed twice is written once.
+        let twice: Vec<SignatureKind> = kinds.iter().chain(&kinds).copied().collect();
+        let f = Fixture { signatures: twice, ..Fixture::new(four()) };
+        let mem = f.to_streams();
+        let mut root = mem.children(&[]).unwrap();
+        root.sort();
+        let mut want: Vec<String> = kinds.iter().map(|k| k.stream_name().to_owned()).collect();
+        want.extend(["PROJECT".to_owned(), "VBA".to_owned()]);
+        want.sort();
+        assert_eq!(root, want, "{kinds:?}");
+        // The writer accepts the U+0005 names, and the bin holds the same bytes.
+        let streams = read_cfb(&f.to_vba_project_bin().unwrap()).unwrap();
+        assert_eq!(streams, mem_streams(&mem), "{kinds:?}");
+        for k in &kinds {
+            assert_eq!(streams[&path(&[k.stream_name()])], SIGNATURE_PLACEHOLDER, "{k:?}");
+        }
+        let p = read(&mem);
+        assert!(p.signed, "{kinds:?}");
+        assert_eq!(codes_of(&p, None), [DiagCode::Signed], "{kinds:?}");
+        assert_eq!(summary(&p), expected(&f), "signatures don't change the modules");
+    }
+    let unsigned = read(&Fixture::new(four()).to_streams());
+    assert!(!unsigned.signed && unsigned.diagnostics.is_empty());
+}
+
+#[test]
+fn control_characters_are_valid_cfb_names() {
+    // [MS-CFB] §2.6.1 forbids only / \ : ! in names.
+    let specs: Vec<StreamSpec> = ["\u{5}DigitalSignature", "\u{1}CompObj", "a\u{7}b"]
+        .iter()
+        .map(|n| StreamSpec { path: path(&[n]), data: vec![1], damage: Damage::None })
+        .collect();
+    let streams = read_cfb(&cfb::write(&specs).unwrap()).unwrap();
+    assert_eq!(streams.len(), 3);
+    assert_eq!(streams[&path(&["\u{5}DigitalSignature"])], [1]);
+}
+
+#[test]
+fn remove_stream_drops_it_from_both_outputs() {
+    for target in [path(&["PROJECT"]), path(&["VBA", "dir"]), path(&["vba", "class1"])] {
+        let f = Fixture { corrupt: vec![Corruption::RemoveStream { path: target.clone() }], ..Fixture::new(four()) };
+        let mem = mem_streams(&f.to_streams());
+        assert!(!mem.keys().any(|k| k.len() == target.len() && k.iter().zip(&target).all(|(a, b)| a.eq_ignore_ascii_case(b))), "{target:?}");
+        assert_eq!(mem.len(), mem_streams(&Fixture::new(four()).to_streams()).len() - 1, "{target:?}");
+        assert_eq!(read_cfb(&f.to_vba_project_bin().unwrap()).unwrap(), mem, "{target:?}");
+    }
+}
+
+#[test]
+fn pad_project_stream_passes_the_cap() {
+    let f = Fixture { corrupt: vec![Corruption::PadProjectStream], ..Fixture::new(four()) };
+    let text = mem_streams(&f.to_streams()).remove(&path(&["PROJECT"])).unwrap();
+    assert!(text.len() > crate::project_stream::MAX_PROJECT_STREAM);
+    let plain = Fixture::new(four()).project_text();
+    assert!(text.starts_with(&plain[..plain.iter().position(|&b| b == b'\n').unwrap() + 1]), "the ID= line comes first");
+    assert!(text.ends_with(&plain[plain.iter().position(|&b| b == b'\n').unwrap() + 1..]), "the rest follows the filler");
+    assert!(crate::project_stream::parse_project_stream(&text).truncated);
+}
+
+/// One fixture per [`DiagCode`], read from the [`MemSource`]. The bin half, through the real
+/// compound file reader, is in the engine (`vba_source/tests.rs`).
+#[test]
+fn every_diagnostic_code_has_a_fixture() {
+    let mut ids: Vec<&str> = ALL_DIAG_CODES.iter().map(DiagCode::as_str).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), ALL_DIAG_CODES.len(), "ALL_DIAG_CODES lists each code once");
+    for code in ALL_DIAG_CODES {
+        let d = diag_fixture(code);
+        let p = read_project(&d.fixture.to_streams(), &d.limits);
+        assert!(codes_of(&p, d.module).contains(&code), "{code:?}: got {p:#?}");
+        if let Some(name) = d.module {
+            assert_eq!(name, DIAG_MODULE);
+            assert!(!codes_of(&p, None).contains(&code), "{code:?} is a module diagnostic");
+        }
+    }
 }
