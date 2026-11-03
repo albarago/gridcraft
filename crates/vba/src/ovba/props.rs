@@ -1,5 +1,5 @@
 //! Property tests for [`decompress`] and the test-only [`compress`] (design properties P1 and
-//! P2), driven by a seeded xorshift64 generator so every failure replays.
+//! P2), driven by the seeded xorshift64 [`Rng`] of `testutil` so every failure replays.
 //!
 //! - P1 (round trip): `decompress(compress(x))` is `x` followed only by 0x00 padding, which only
 //!   a raw last chunk adds (§2.4.1.3.10), and is at most `len(x)` rounded up to 4,096 bytes. With
@@ -21,9 +21,8 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use super::{COMPRESSED_FLAG, DECOMPRESSED_CHUNK_MAX, MAX_DECOMPRESSED, OvbaError, SIGNATURE_BITS, SIGNATURE_BYTE, SIZE_MASK, compress, decompress};
+use crate::testutil::{Rng, seed_list};
 
-/// Default `GRIDCRAFT_FUZZ_SEEDS`: small, so `cargo xtask ci` stays fast.
-const DEFAULT_SEEDS: u64 = 64;
 /// P2 inputs per seed.
 const P2_INPUTS_PER_SEED: u64 = 32;
 /// The longest P1 input.
@@ -41,68 +40,6 @@ const SMALL_CHUNK: [u8; 6] = [0x03, 0xB0, 0x02, 0x61, 0x45, 0x00];
 /// Distinct streams so P1 and P2 seeds don't share random sequences.
 const P1_STREAM: u64 = 0x5031_5031_5031_5031;
 const P2_STREAM: u64 = 0x5032_5032_5032_5032;
-
-// ---------------------------------------------------------------- deterministic randomness
-
-/// xorshift64: tiny and deterministic.
-struct Rng(u64);
-
-impl Rng {
-    fn new(seed: u64, stream: u64) -> Self {
-        // Spread consecutive seeds over the state space; xorshift needs a nonzero state.
-        let mixed = seed.wrapping_add(1).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ stream;
-        let mut rng = Self(if mixed == 0 { 0x2545_F491_4F6C_DD1D } else { mixed });
-        for _ in 0..4 {
-            rng.next();
-        }
-        rng
-    }
-
-    fn next(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.0 = x;
-        x
-    }
-
-    fn byte(&mut self) -> u8 {
-        (self.next() >> 56) as u8
-    }
-
-    fn below(&mut self, n: usize) -> usize {
-        if n == 0 { 0 } else { (self.next() % n as u64) as usize }
-    }
-
-    /// Inclusive range.
-    fn range(&mut self, lo: usize, hi: usize) -> usize {
-        lo + self.below(hi.saturating_sub(lo) + 1)
-    }
-
-    fn chance(&mut self, percent: u64) -> bool {
-        self.next() % 100 < percent
-    }
-
-    fn fill(&mut self, out: &mut Vec<u8>, n: usize) {
-        out.extend((0..n).map(|_| self.byte()));
-    }
-}
-
-fn env_num(name: &str) -> Option<u64> {
-    std::env::var(name).ok().and_then(|v| v.trim().parse().ok())
-}
-
-/// The seeds to run: `GRIDCRAFT_FUZZ_SEED` alone, or `0..count`.
-fn seed_list(per_seed: u64) -> (Vec<u64>, bool) {
-    match env_num("GRIDCRAFT_FUZZ_SEED") {
-        Some(one) => (vec![one], true),
-        None => {
-            let seeds = env_num("GRIDCRAFT_FUZZ_SEEDS").unwrap_or(DEFAULT_SEEDS);
-            ((0..seeds.saturating_mul(per_seed)).collect(), false)
-        }
-    }
-}
 
 fn replay(seed: u64, test: &str) -> String {
     format!("replay: GRIDCRAFT_FUZZ_SEED={seed} cargo test -p gridcraft-vba --lib ovba::props::{test}")
@@ -285,7 +222,7 @@ fn structured_input(rng: &mut Rng) -> Vec<u8> {
                     if (flags >> index) & 1 == 0 {
                         out.push(rng.byte());
                     } else if rng.chance(50) {
-                        out.extend_from_slice(&(rng.next() as u16).to_le_bytes());
+                        out.extend_from_slice(&(rng.next_u64() as u16).to_le_bytes());
                     } else {
                         // A short reach and length, which is often valid.
                         let token = ((rng.below(4) << 12) | rng.below(64)) as u16;
