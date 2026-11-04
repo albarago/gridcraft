@@ -290,7 +290,7 @@ pub fn reason_text(r: &Json) -> String {
         "memberNotPlanned" => format!("{} is not planned", text(r, "member")),
         "unparsedModule" => format!("{at}: the code didn't parse"),
         "unreadableModule" => format!("{module}: the source can't be read (it may have been removed)"),
-        "memberUnknown" => format!("{} is not in the member catalog", text(r, "member")),
+        "memberUnknown" => format!("{} is not in the member catalog or not reviewed yet", text(r, "member")),
         "allKnown" => "Nothing unsupported or unknown was found".to_string(),
         other => other.to_string(),
     }
@@ -783,7 +783,10 @@ mod tests {
     fn report_lines_read_the_analyze_json() {
         assert_eq!(reason_text(&json!({"rule": "flagged", "flag": "Shell", "module": "M", "line": 3})), "Shell in M, line 3");
         assert_eq!(reason_text(&json!({"rule": "unparsedModule", "module": "U", "line": 2})), "U, line 2: the code didn't parse");
-        assert_eq!(reason_text(&json!({"rule": "memberUnknown", "member": "Range.Value"})), "Range.Value is not in the member catalog");
+        assert_eq!(
+            reason_text(&json!({"rule": "memberUnknown", "member": "Range.Value"})),
+            "Range.Value is not in the member catalog or not reviewed yet"
+        );
         assert_eq!(reason_text(&json!({"rule": "allKnown"})), "Nothing unsupported or unknown was found");
         assert_eq!(
             flag_text(&json!({"kind": "CreateObject", "module": "M", "startLine": 4, "endLine": 5, "progId": "WScript.Shell"})),

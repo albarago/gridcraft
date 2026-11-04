@@ -212,7 +212,7 @@ pub enum MemberStatus {
     Planned,
     /// Support is not planned.
     NotPlanned,
-    /// Not in the catalog (13.7).
+    /// Not in the catalog (13.7), or listed as `unreviewed` (13.6).
     Unknown,
 }
 
@@ -236,8 +236,8 @@ pub trait MemberCatalog {
     fn status(&self, object: Option<&str>, member: &str) -> Option<MemberStatus>;
 }
 
-/// A catalog that lists nothing, so every member is [`MemberStatus::Unknown`]. Used until the
-/// checked-in catalog exists (task 12).
+/// A catalog that lists nothing, so every member is [`MemberStatus::Unknown`]. For tests; the
+/// engine uses [`ExcelCatalog`](crate::catalog::ExcelCatalog).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EmptyCatalog;
 
