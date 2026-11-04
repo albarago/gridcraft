@@ -157,7 +157,14 @@ fn vba_analyze_reports_flags_unreadable_unparsed_and_clean_modules() {
     assert_eq!(m["incomplete"], true);
     assert_eq!(m["incompleteReasons"], json!([{"kind": "unparsedModule", "module": "Broken"}, {"kind": "unreadableModule", "module": "Stomped"}]));
     assert_eq!(m["dynamic"], json!([]));
-    assert!(r["members"].as_array().unwrap().iter().all(|m| m["status"] == "unknown" && m["count"].as_u64().is_some_and(|c| c > 0)));
+    let statuses = ["supported", "planned", "notPlanned", "unknown"];
+    assert!(
+        r["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| statuses.contains(&m["status"].as_str().unwrap()) && m["count"].as_u64().is_some_and(|c| c > 0))
+    );
 }
 #[test]
 fn vba_analyze_writes_dynamic_uses_and_members() {
@@ -172,12 +179,13 @@ fn vba_analyze_writes_dynamic_uses_and_members() {
     assert_eq!(
         r["members"],
         json!([
-            {"object": "Range", "member": "Value", "count": 1, "status": "unknown"},
+            {"object": "Range", "member": "Value", "count": 1, "status": "planned"},
             {"object": "ws", "member": "Range", "count": 1, "status": "unknown"},
         ])
     );
+    // `Range.Value` is in the catalog's tranche 1; `ws` is a variable with no type yet.
     assert_eq!(r["verdict"], "analysisOnly");
-    assert_eq!(r["reasons"][0], json!({"rule": "memberUnknown", "member": "Range.Value"}));
+    assert_eq!(r["reasons"], json!([{"rule": "memberUnknown", "member": "ws.Range"}]));
 }
 #[test]
 fn vba_analyze_without_a_project_is_no_macros_not_an_error() {

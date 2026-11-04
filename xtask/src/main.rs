@@ -13,6 +13,7 @@ mod layers;
 #[cfg_attr(not(feature = "engine"), allow(dead_code))]
 mod parity;
 mod stats;
+mod vba_catalog;
 mod version;
 
 use std::path::{Path, PathBuf};
@@ -39,6 +40,9 @@ commands:
   stats [--exact] count tests and lines per crate (--exact: ask the test harness via `-- --list`)
   ico <out.ico> <in.png>...
                   pack square PNGs (<= 256 px) into a Windows .ico (see packaging/icons.sh)
+  vba-catalog --docs <VBA-Docs checkout> [--out PATH] [--commit SHA]
+                  offline, not run by ci: regenerate crates/vba/data/excel-members.tsv (VBA member
+                  names and signatures, CC-BY-4.0) keeping existing statuses and notes
 ";
 
 fn main() -> ExitCode {
@@ -55,6 +59,7 @@ fn main() -> ExitCode {
         Some("parity") => parity::run(&root(), &rest),
         Some("keytips") => keytips::run(&root(), &rest),
         Some("ico") => ico::run(&rest),
+        Some("vba-catalog") => vba_catalog::run(&root(), &rest),
         Some("version") => version::run(&root(), &rest),
         Some("-h" | "--help" | "help") | None => {
             print!("{USAGE}");
