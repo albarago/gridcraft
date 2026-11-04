@@ -745,6 +745,43 @@ pub(crate) fn paint_overlays(input: OverlayInput<'_>) {
             ui.label(tip);
         });
     }
+    // A `#BLOCKED!` cell whose formula calls VBA functions names them and says they don't run
+    // (Req 17.8): at the pointer over a hovered cell, else beside the active cell.
+    if app.editor.is_none() && app.grid.drag == Drag::None {
+        let blocked_udf = |c: gridcraft_engine::core::CellRef| -> Option<Vec<String>> {
+            use gridcraft_engine::core::{CellError, Value};
+            if sh.value(c) != Value::Error(CellError::Blocked) {
+                return None;
+            }
+            let calls = app.session.active()?.udf_calls(si, c);
+            (!calls.is_empty()).then_some(calls)
+        };
+        let lang = crate::i18n::current(ui.ctx());
+        if let Some(calls) = hover.and_then(blocked_udf) {
+            egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::unique("udf_tip"), egui::PopupAnchor::Pointer).show(|ui| {
+                for line in udf_blocked_tip(lang, &calls) {
+                    ui.label(line);
+                }
+            });
+        } else if hover.is_none()
+            && let Some(calls) = blocked_udf(sel.active)
+            && !geo.hidden_under_frozen(sh, sel.active)
+        {
+            let r = geo.cell_rect(sh, sel.active);
+            let (at, pivot) = (geo.mirror_pos(pos2(r.left() + 8.0, r.bottom() + 6.0)), if geo.rtl { Align2::RIGHT_TOP } else { Align2::LEFT_TOP });
+            egui::Area::new(egui::Id::unique("udf_note")).fixed_pos(at).pivot(pivot).order(egui::Order::Tooltip).interactable(false).show(
+                ui.ctx(),
+                |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_max_width(260.0);
+                        for line in udf_blocked_tip(lang, &calls) {
+                            ui.label(line);
+                        }
+                    });
+                },
+            );
+        }
+    }
     if let Some(o) = &app.grid.macro_overlay {
         crate::macro_editor::paint_overlay(p, geo, sh, o);
     }
@@ -778,6 +815,17 @@ pub(crate) fn paint_overlays(input: OverlayInput<'_>) {
         }
     }
     let _ = (wb, si);
+}
+
+/// The lines of the note on a `#BLOCKED!` cell whose formula calls the VBA functions `calls`
+/// (as the formula writes them; the `_xludf.` files put before them is left out).
+pub(crate) fn udf_blocked_tip(lang: crate::i18n::Language, calls: &[String]) -> [String; 2] {
+    let names: Vec<&str> =
+        calls.iter().map(|n| n.get(..7).filter(|p| p.eq_ignore_ascii_case("_xludf.")).and_then(|_| n.get(7..)).unwrap_or(n)).collect();
+    [
+        format!("{} {}", lang.tr("Calls VBA functions:"), names.join(", ")),
+        lang.tr("VBA functions are not executed, so this cell shows #BLOCKED! instead of a result.").to_owned(),
+    ]
 }
 
 fn paint_pages(app: &mut SheetApp, p: &Painter, geo: &Geo, sh: &Sheet) {

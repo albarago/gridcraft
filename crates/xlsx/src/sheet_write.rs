@@ -771,6 +771,12 @@ fn write_cell(s: &mut String, input: CellWriteInput<'_>, sid: &dyn Fn(gridcraft_
         v => v,
     };
     let value = match value {
+        // A formula showing #BLOCKED! has no known result: a cell calling a VBA function GridCraft
+        // doesn't run, after its inputs or text changed (Req 17.12), or a cell reading one, whose
+        // result depends on that unknown. It is saved with no cached value (and the workbook
+        // asks for a full calculation on load), so the next application calculates it rather
+        // than showing a made-up #VALUE!. A Python cell has no `formula` and keeps #VALUE!.
+        Value::Error(CellError::Blocked) if formula.is_some() => Value::Empty,
         Value::Error(CellError::Circ) => Value::Number(0.0),
         // #SPILL! and #CALC! are not error codes of the file format (Excel refuses a file that
         // caches them); Excel itself caches them as #VALUE!. The Python errors are the same kind.

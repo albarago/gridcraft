@@ -652,3 +652,42 @@ fn xls_short_window2_is_ignored() {
         assert_eq!(v(&wb, 0, "A1"), Value::Number(7.0));
     }
 }
+
+/// Req 17.1: a Lbl flagged fFunc|fProc (a VBA function, #2139's `DIAGONALWERT`) is still skipped
+/// as a defined name, the cell calling it keeps its formula, and the name is kept for calc in
+/// `xls_macro_names`, which saving never writes.
+#[test]
+fn macro_function_names_are_kept_for_calc_and_never_saved() {
+    // fFunc (0x0002) | fProc (0x0008) | fOB (0x0010), no formula; "Rate" is an ordinary name.
+    let lbl = |flags: u16, name: &str, rgce: &[u8]| {
+        rec(0x0018, &cat(&[&u16s(&[flags]), &[0, name.len() as u8], &u16s(&[rgce.len() as u16, 0, 0]), &[0; 4], &[0], name.as_bytes(), rgce]))
+    };
+    let rate = cat(&[&[0x3A], &0u16.to_le_bytes(), &u16s(&[0, 0])]);
+    let globals = |pos: u32| {
+        cat(&[
+            &bof(0x0005),
+            &rec(0x0085, &cat(&[&pos.to_le_bytes(), &[0, 0, 6, 0], b"Sheet1"])),
+            &rec(0x01AE, &u16s(&[1, 0x0401])),
+            &rec(0x0017, &cat(&[&u16s(&[1]), &u16s(&[0, 0, 0])])),
+            &lbl(0x001A, "DIAGONALWERT", &[]),
+            &lbl(0x001A, "DIAGONALWERT", &[]),
+            &lbl(0, "Rate", &rate),
+            &eof(),
+        ])
+    };
+    // =DIAGONALWERT(A1): PtgName 1, PtgRef A1, PtgFuncVar with 2 arguments and iftab 255.
+    let call = cat(&[&[0x23], &1u32.to_le_bytes(), &ptg_ref(0, 0), &[0x42, 2], &0x00FFu16.to_le_bytes()]);
+    let sheet = cat(&[&bof(0x0010), &rec(0x0203, &cat(&[&cell(0, 0, 0), &3.0f64.to_le_bytes()])), &formula(0, 1, num(6.0), &call), &eof()]);
+    let (wb, _) = read_xls(&compound("Workbook", &cat(&[&globals(globals(0).len() as u32), &sheet]))).unwrap();
+    assert_eq!(wb.xls_macro_names, ["DIAGONALWERT"], "once, though listed twice");
+    assert_eq!(wb.names.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(), ["Rate"]);
+    assert_eq!(ftext(&wb, "B1").as_deref(), Some("DIAGONALWERT(A1)"));
+    // Saving as .xlsx writes the same package with or without the names.
+    let mut without = wb.clone();
+    without.xls_macro_names.clear();
+    assert_eq!(crate::write_xlsx(&wb).unwrap(), crate::write_xlsx(&without).unwrap());
+    let (back, _) = crate::read_xlsx(&crate::write_xlsx(&wb).unwrap()).unwrap();
+    assert!(back.xls_macro_names.is_empty());
+    // An .xls without macro names has none.
+    assert!(read_xls(&compound("Workbook", &sample(false))).unwrap().0.xls_macro_names.is_empty());
+}

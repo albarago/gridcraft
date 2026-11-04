@@ -250,6 +250,20 @@ pub struct Workbook {
     /// xlsx writer doesn't write signature parts back, so a saved copy is unsigned).
     #[serde(skip)]
     pub vba_signature_part: bool,
+    /// The `.xls` defined names whose Lbl record has `fFunc` or `fProc` set ([MS-XLS] 2.4.150):
+    /// macro names, which a formula calls as a VBA function (`=DIAGONALWERT(I11)`). Set by the
+    /// `.xls` reader, which skips these names (they aren't in `names`) and doesn't read the VBA
+    /// project, so calc can still tell such a call is a UDF call (Req 17.1). State of the file as
+    /// opened, not a setting: never saved (not in JSON, and no writer writes it).
+    #[serde(skip)]
+    pub xls_macro_names: Vec<String>,
+    /// The names calc treats as user-defined (VBA) functions, ASCII upper-cased and without
+    /// built-ins: the public `Function`s of the VBA project's standard modules and the `.xls`
+    /// macro names (Req 17.1). Set by the engine whenever it gives calc its UDF names, so the
+    /// xlsx writer can tell a call is a UDF call (a range passed to one is the range itself, not
+    /// an implicit intersection). State of the session, not of the file: never saved.
+    #[serde(skip)]
+    pub udf_names: Vec<String>,
     /// Field separator of the CSV this workbook was read from, so saving it as CSV writes the same
     /// separator back (a `;` file stays a `;` file). `None` = not read from CSV: CSV saves use `,`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -367,6 +381,8 @@ impl Workbook {
             phonetics: vec![],
             vba_project: None,
             vba_signature_part: false,
+            xls_macro_names: vec![],
+            udf_names: vec![],
             csv_delimiter: None,
             macros: crate::macros::Macros::default(),
             macros_read: vec![],

@@ -92,6 +92,18 @@ fn udf_candidates_need_a_public_function_in_a_standard_module() {
     let r = report(vec![module("M", ModuleKind::Standard, src), module("C", ModuleKind::Class, "Function InClass()\nEnd Function\n")]);
     assert_eq!(marks_of(&r), [("Twice", vec![Mark::UdfCandidate]), ("Hidden", vec![]), ("InClass", vec![])]);
 }
+#[test]
+fn udf_names_are_the_udf_candidates_upper_cased() {
+    let src = "Function Twice(x)\nEnd Function\nPublic Function diagonalWert(n As String)\nEnd Function\nPrivate Function Hidden()\nEnd Function\nSub NotAFunction()\nEnd Sub\n";
+    let modules = vec![module("M", ModuleKind::Standard, src), module("C", ModuleKind::Class, "Function InClass()\nEnd Function\n")];
+    let names = super::udf_names(&project(modules.clone()));
+    assert_eq!(names.into_iter().collect::<Vec<_>>(), ["DIAGONALWERT", "TWICE"]);
+    // The same procedures `analyze` marks.
+    let marked: Vec<String> =
+        report(modules).procedures.iter().filter(|p| p.marks.contains(&Mark::UdfCandidate)).map(|p| p.name.to_ascii_uppercase()).collect();
+    assert_eq!(marked, ["TWICE", "DIAGONALWERT"]);
+    assert!(super::udf_names(&VbaProject::default()).is_empty());
+}
 
 #[test]
 fn event_handlers_follow_the_document_module() {

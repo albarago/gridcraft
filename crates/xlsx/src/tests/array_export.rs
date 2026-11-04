@@ -480,3 +480,24 @@ fn long_flat_chains_are_scalar_formulas() {
     assert_dynamic(&sheet, "B4", "B4");
     assert_eq!(cell(&sheet, "B1").child("f").unwrap().text, refs);
 }
+/// Excel passes a user-defined (VBA) function a range itself: a range argument to an `_xludf.`
+/// call or to one of the workbook's UDF names is not an implicit intersection, so the formula
+/// stays a plain one (Req 17.11). An unknown function that isn't a UDF still lifts a range, and
+/// a range inside an operation in a UDF argument still needs array evaluation.
+#[test]
+fn a_range_passed_to_a_udf_keeps_the_formula_scalar() {
+    let mut wb = Workbook::new();
+    wb.udf_names = vec!["ADDUP".into()];
+    let sheet = wb.sheet_mut(0).unwrap();
+    sheet.cells.set(at("B1"), formula("_xludf.AddUp(A1:A3)", 6.0));
+    sheet.cells.set(at("B2"), formula("1+AddUp(A7:A8,A1)", 7.0));
+    sheet.cells.set(at("B3"), formula("Other(A1:A3)", 0.0));
+    sheet.cells.set(at("B4"), formula("AddUp(A1:A3*2)", 12.0));
+    let bytes = write_xlsx(&wb).unwrap();
+    let mut pkg = Package::open(&bytes).unwrap();
+    let sheet = pkg.read_xml("xl/worksheets/sheet1.xml").unwrap().unwrap();
+    assert_scalar(&sheet, "B1");
+    assert_scalar(&sheet, "B2");
+    assert_dynamic(&sheet, "B3", "B3");
+    assert_dynamic(&sheet, "B4", "B4");
+}

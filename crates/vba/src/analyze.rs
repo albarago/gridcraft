@@ -1147,6 +1147,24 @@ const fn suffix_type(suffix: char) -> Option<&'static str> {
     }
 }
 
+/// 13.3: a `Function` in a standard module that is not declared `Private`.
+fn is_udf_candidate(module: &VbaModule, proc: &Proc) -> bool {
+    module.kind == ModuleKind::Standard && proc.visibility != Some(Visibility::Private) && proc.kind == ProcKind::Function
+}
+/// The names of `project`'s UDF candidates (the procedures [`analyze`] marks
+/// [`Mark::UdfCandidate`]), ASCII upper-cased as the formula parser writes function names, for
+/// the calc engine's UDF-call rule (Req 17.1). Only standard modules are parsed; unreadable and
+/// empty modules, and procedures the parser recovered from, add nothing, as in [`analyze`].
+pub fn udf_names(project: &VbaProject) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for module in project.modules.iter().filter(|m| m.kind == ModuleKind::Standard && !m.source.is_empty() && !is_unreadable(m)) {
+        let (Some(tree), _) = parse(&module.source) else { continue };
+        for proc in tree.procs.iter().filter(|p| !p.is_recovered() && is_udf_candidate(module, p)) {
+            out.insert(proc.name.to_ascii_uppercase());
+        }
+    }
+    out
+}
 /// The marks of 13.2–13.5, in [`Mark`] order.
 fn marks(module: &VbaModule, proc: &Proc) -> Vec<Mark> {
     let public = proc.visibility != Some(Visibility::Private);
@@ -1157,7 +1175,7 @@ fn marks(module: &VbaModule, proc: &Proc) -> Vec<Mark> {
     if standard && public && proc.kind == ProcKind::Sub && proc.params.is_empty() {
         marks.push(Mark::EntryPoint);
     }
-    if standard && public && proc.kind == ProcKind::Function {
+    if is_udf_candidate(module, proc) {
         marks.push(Mark::UdfCandidate);
     }
     if (this_workbook && has_event_prefix(&proc.name, "Workbook_")) || (sheet && has_event_prefix(&proc.name, "Worksheet_")) {

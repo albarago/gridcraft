@@ -17,6 +17,7 @@ use gridcraft_formula::Expr;
 use gridcraft_model::{CalcMode, Workbook};
 
 use crate::eval::{Evaluator, Host, precedents, stack_position};
+use crate::udf::UdfNames;
 
 mod graph;
 mod pass_host;
@@ -37,11 +38,24 @@ pub struct Calc {
     /// Cells whose formulas have errors from cycles.
     pub circular: Vec<Key>,
     pub last_recalc_cells: usize,
+    /// The workbook's UDF names ([`crate::udf`]); empty unless the engine sets them.
+    udf: UdfNames,
+    /// The formulas with at least one UDF call: foreign-result cells ([`crate::udf`]), whose
+    /// value calc keeps or blocks and never computes.
+    foreign: HashSet<Key>,
 }
 
 impl Default for Calc {
     fn default() -> Self {
-        Calc { graph: Graph::default(), rng: 0x9E37_79B9_7F4A_7C15, fixed_now: None, circular: vec![], last_recalc_cells: 0 }
+        Calc {
+            graph: Graph::default(),
+            rng: 0x9E37_79B9_7F4A_7C15,
+            fixed_now: None,
+            circular: vec![],
+            last_recalc_cells: 0,
+            udf: UdfNames::default(),
+            foreign: HashSet::default(),
+        }
     }
 }
 
@@ -114,6 +128,43 @@ impl Calc {
         Self::default()
     }
 
+    /// The UDF names calls are matched against (Req 17.1).
+    pub fn udf_names(&self) -> &UdfNames {
+        &self.udf
+    }
+
+    /// Sets the workbook's UDF names. Call it before the first recalculation; when the names
+    /// change after the graph was built, the graph is rebuilt from `wb` (nothing is evaluated).
+    pub fn set_udf_names(&mut self, wb: &Workbook, names: UdfNames) {
+        if names == self.udf {
+            return;
+        }
+        self.udf = names;
+        if !self.graph.nodes.is_empty() {
+            self.rebuild(wb);
+        }
+    }
+
+    /// Whether the formula at `k` calls a UDF: a foreign-result cell ([`crate::udf`]).
+    pub fn is_foreign(&self, k: Key) -> bool {
+        self.foreign.contains(&k)
+    }
+
+    /// The UDF calls of `e`, a formula on `sheet` of `wb` ([`UdfNames::udf_calls`]), by name as
+    /// written: what a tooltip on a foreign-result cell lists.
+    pub fn udf_calls(&self, wb: &Workbook, sheet: usize, e: &Expr) -> Vec<String> {
+        self.udf.udf_calls(wb, sheet, e)
+    }
+
+    /// Notes whether the formula `e` at `k` is a foreign-result cell.
+    fn note_foreign(&mut self, wb: &Workbook, k: Key, e: &Expr) {
+        if self.udf.udf_calls(wb, k.0, e).is_empty() {
+            self.foreign.remove(&k);
+        } else {
+            self.foreign.insert(k);
+        }
+    }
+
     fn now(&self) -> f64 {
         if let Some(n) = self.fixed_now {
             return n;
@@ -124,14 +175,16 @@ impl Calc {
     /// Rebuilds the graph from scratch.
     pub fn rebuild(&mut self, wb: &Workbook) {
         self.graph = Graph::default();
+        self.foreign.clear();
         let mut circ = Vec::new();
         for (si, sheet) in wb.sheets.iter().enumerate() {
             for (c, cell) in sheet.cells.iter() {
                 if let Some(f) = &cell.formula
                     && let Some(e) = f.expr()
                 {
-                    let (areas, dynamic) = precedents(wb, si, &e);
+                    let (areas, dynamic) = precedents(wb, si, &e, &self.udf);
                     self.graph.insert((si, c), Node { areas, dynamic });
+                    self.note_foreign(wb, (si, c), &e);
                     if cell.value == Value::Error(CellError::Circ) {
                         circ.push((si, c));
                     }
@@ -216,11 +269,13 @@ impl Calc {
             let spills = py.and_then(|p| p.result_value()).is_some_and(|v| matches!(v, Value::Array(_)));
             match formula.and_then(|f| f.expr()) {
                 Some(e) => {
-                    let (areas, dynamic) = precedents(wb, k.0, &e);
+                    let (areas, dynamic) = precedents(wb, k.0, &e, &self.udf);
                     self.graph.insert(k, Node { areas, dynamic });
+                    self.note_foreign(wb, k, &e);
                 }
                 // See `rebuild`: its spill is laid out again from its result when it is calculated.
                 None if python => {
+                    self.foreign.remove(&k);
                     self.graph.insert(k, Node { areas: Vec::new(), dynamic: false });
                     // New code has no result yet: the spill the cell had (its old result's, or a
                     // formula's) goes, and what read it is recalculated, as for a formula
@@ -234,6 +289,7 @@ impl Calc {
                     }
                 }
                 None => {
+                    self.foreign.remove(&k);
                     self.graph.remove(k);
                     // A formula replaced by a constant (or cleared) takes its spilled values with it.
                     if let Some(sh) = wb.sheet_mut(k.0)
@@ -258,6 +314,17 @@ impl Calc {
             // Only the edited formulas themselves are evaluated.
             let own: Vec<Key> = changed.iter().copied().filter(|k| self.graph.nodes.contains_key(k)).collect();
             self.run(wb, own, false);
+            // A foreign-result cell that would be recalculated is out of date now, and no later
+            // calculation can bring its saved result back: it is `#BLOCKED!` at once.
+            if !self.foreign.is_empty() {
+                for k in self.dirty_closure(wb, changed, &[]) {
+                    if self.foreign.contains(&k)
+                        && let Some(cell) = wb.sheet_mut(k.0).and_then(|s| s.cells.get_mut(k.1))
+                    {
+                        cell.value = Value::Error(CellError::Blocked);
+                    }
+                }
+            }
             return;
         }
         let mut seeds: Vec<Key> = changed.to_vec();
@@ -381,10 +448,26 @@ impl Calc {
                     exprs.insert(*k, e);
                 }
             }
-            let python: HashMap<Key, Value> = dirty
+            let mut python: HashMap<Key, Value> = dirty
                 .iter()
                 .filter_map(|k| wb.sheet(k.0).and_then(|s| s.cell(k.1)).and_then(|c| c.py.as_ref()).and_then(|p| p.result_value()).map(|v| (*k, v)))
                 .collect();
+            // Foreign-result cells are laid out like Python cells, never evaluated (Req 17.10). A
+            // full recalculation keeps the value each one has: the saved result while clean, or
+            // the `#BLOCKED!` it got once it went out of date (Req 17.5). A formula without a
+            // saved result is `#BLOCKED!` (Req 17.4). Any other recalculation reaches a foreign
+            // cell only because something it reads, or its formula, changed: `#BLOCKED!` (Req
+            // 17.6, 17.7).
+            if !self.foreign.is_empty() {
+                for k in dirty.iter().filter(|k| self.foreign.contains(k)) {
+                    exprs.remove(k);
+                    let kept = match wb.sheet(k.0).and_then(|s| s.cell(k.1)).map(|c| &c.value) {
+                        Some(v) if full && !v.is_empty() => v.clone(),
+                        _ => Value::Error(CellError::Blocked),
+                    };
+                    python.insert(*k, kept);
+                }
+            }
             let now = self.now();
             let mut rng = self.rng;
             let tp = prof_now();

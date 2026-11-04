@@ -296,22 +296,50 @@ fn trim_to_budget(history: &mut Vec<HistoryEntry>, byte_budget: usize) {
     }
 }
 
+/// Gives `calc` the UDF names `names` (Req 17.1) and records them, built-ins left out, in
+/// [`Workbook::udf_names`], so the xlsx writer sees the same UDF calls calc does.
+pub(crate) fn set_udf_names(calc: &mut Calc, wb: &mut Workbook, names: gridcraft_calc::UdfNames) {
+    wb.udf_names = names.names().filter(|n| !gridcraft_calc::is_known_function(n)).map(str::to_owned).collect();
+    calc.set_udf_names(wb, names);
+}
+
 impl DocState {
     /// A document for `wb`, which came from where `trust` says: [`Trust::FromFile`] for anything
     /// read from bytes (a file, a download, a recovery copy), [`Trust::Local`] only for a workbook
     /// made in this session.
-    pub fn new(mut wb: Workbook, path: Option<String>, title: String, trust: Trust) -> DocState {
+    /// Calls are matched against the workbook's `.xls` macro names only; a workbook opened from
+    /// a file goes through [`DocState::new_with_udf_names`] with its VBA project's names too.
+    pub fn new(wb: Workbook, path: Option<String>, title: String, trust: Trust) -> DocState {
+        let udf = gridcraft_calc::UdfNames::new(&wb.xls_macro_names);
+        Self::new_with_udf_names(wb, path, title, trust, udf)
+    }
+    /// [`DocState::new`], with calc matching calls against `udf` (Req 17.1), set before the
+    /// first recalculation.
+    pub fn new_with_udf_names(mut wb: Workbook, path: Option<String>, title: String, trust: Trust, udf: gridcraft_calc::UdfNames) -> DocState {
         let mut calc = Calc::new();
+        set_udf_names(&mut calc, &mut wb, udf);
         calc.recalc_all(&mut wb);
         Self::with_calc(wb, calc, path, title, trust)
     }
     /// A workbook as its file saved it: the dependency graph is built but nothing is
     /// evaluated, so every value is the one the file holds until an edit reaches it. `trust`
     /// is as for [`DocState::new`].
-    pub fn from_saved(wb: Workbook, path: Option<String>, title: String, trust: Trust) -> DocState {
+    pub fn from_saved(mut wb: Workbook, path: Option<String>, title: String, trust: Trust) -> DocState {
         let mut calc = Calc::new();
+        let udf = gridcraft_calc::UdfNames::new(&wb.xls_macro_names);
+        set_udf_names(&mut calc, &mut wb, udf);
         calc.rebuild(&wb);
         Self::with_calc(wb, calc, path, title, trust)
+    }
+    /// The VBA functions the formula at `at` on `sheet` calls, by name as written, when it is a
+    /// foreign-result cell (Req 17.8); empty otherwise. What the grid's tooltip on a
+    /// `#BLOCKED!` cell and `cell.get`'s `udfCalls` list.
+    pub fn udf_calls(&self, sheet: usize, at: CellRef) -> Vec<String> {
+        if !self.calc.is_foreign((sheet, at)) {
+            return Vec::new();
+        }
+        let expr = self.wb.sheet(sheet).and_then(|sh| sh.cell(at)).and_then(|c| c.formula.as_ref()).and_then(|f| f.expr_arc());
+        expr.map(|e| self.calc.udf_calls(&self.wb, sheet, &e)).unwrap_or_default()
     }
     fn with_calc(mut wb: Workbook, calc: Calc, path: Option<String>, title: String, trust: Trust) -> DocState {
         // Equations arrive without a layout (files never store one); painting reads only the cache.

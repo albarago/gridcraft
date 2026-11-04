@@ -1,6 +1,6 @@
 # Macros
 
-> **Last updated:** 2026-11-04 · **Change:** minor (`vba.analyze` reads member statuses from the checked-in Excel member catalog generated from VBA-Docs; unreviewed members are reported as unknown; earlier: `vba.analyze` returns the VBA compatibility report, View Code gains a Compatibility tab and colours source from the VBA lexer, and a stomped module with only `Attribute` lines counts as unreadable; earlier: the VBA compatibility analyzer lists a capability manifest of nine categories from a checked-in trigger table, marks it incomplete for dynamic dispatch and for unparsed or unreadable modules, and says which categories the script sandbox can't enforce yet; earlier: View Code in the Macros dialog shows a workbook's VBA modules and source, read only; earlier: `vba.modules` and `vba.source` read a workbook's VBA modules and source, read-only, from the CLI, MCP and the control channel; earlier: a workbook's VBA source can be read without running it; possible VBA stomping is flagged, signed projects are reported as signed (not verified), and compiled code is not checked against the source; saving a signed workbook doesn't keep its signature part yet; earlier: form buttons run macros, `macro.run` takes `output`, and a button action kept in a hidden name comes back on reopen only while the file still agrees with it; earlier: a close that waits on the step editor's question runs in the editor's window, and a further close asked meanwhile waits for the answer or is refused; earlier: closing a workbook or quitting asks about the step editor's unsaved draft first; recording macros and the management commands; Record Macro takes a name, shortcut and description; the macro interface: Automate › Macros, the Macros and Record Macro dialogs, the step editor, shortcuts)
+> **Last updated:** 2026-11-04 · **Change:** minor (formulas that call VBA functions keep the results saved in the file until something they read changes, then show `#BLOCKED!` with a note naming the functions; saving keeps the formula with its saved result, or with none when blocked; earlier: `vba.analyze` reads member statuses from the checked-in Excel member catalog generated from VBA-Docs; unreviewed members are reported as unknown; earlier: `vba.analyze` returns the VBA compatibility report, View Code gains a Compatibility tab and colours source from the VBA lexer, and a stomped module with only `Attribute` lines counts as unreadable; earlier: the VBA compatibility analyzer lists a capability manifest of nine categories from a checked-in trigger table, marks it incomplete for dynamic dispatch and for unparsed or unreadable modules, and says which categories the script sandbox can't enforce yet; earlier: View Code in the Macros dialog shows a workbook's VBA modules and source, read only; earlier: `vba.modules` and `vba.source` read a workbook's VBA modules and source, read-only, from the CLI, MCP and the control channel; earlier: a workbook's VBA source can be read without running it; possible VBA stomping is flagged, signed projects are reported as signed (not verified), and compiled code is not checked against the source; saving a signed workbook doesn't keep its signature part yet; earlier: form buttons run macros, `macro.run` takes `output`, and a button action kept in a hidden name comes back on reopen only while the file still agrees with it; earlier: a close that waits on the step editor's question runs in the editor's window, and a further close asked meanwhile waits for the answer or is refused; earlier: closing a workbook or quitting asks about the step editor's unsaved draft first; recording macros and the management commands; Record Macro takes a name, shortcut and description; the macro interface: Automate › Macros, the Macros and Record Macro dialogs, the step editor, shortcuts)
 
 GridCraft macros are typed, declarative lists of commands, not VBA. Every step runs a GridCraft
 command (the same ids the ribbon, CLI and MCP use) or one of three bounded control steps. A macro
@@ -389,6 +389,20 @@ recorded. A workbook can hold a script and a macro with the same name.
 A VBA project in an `.xlsm` or `.xltm` file is preserved on save and never run. GridCraft macros
 are stored apart from it.
 
+A formula that calls a VBA function shows the result saved in the file. A call counts as one when
+it names a public `Function` in a standard module of the workbook's VBA project, carries the
+`_xludf.` prefix, or, in an `.xls`, names a macro (a name whose Lbl record is flagged `fFunc` or
+`fProc`). A built-in function and a defined name (a LAMBDA) win over a VBA function of the same
+name. The saved result keeps its type and stays while nothing the formula reads changes, through
+full recalculation too. Once a cell it reads changes, or its formula is edited, or when the file
+saved no result, the cell shows `#BLOCKED!`, and a note on the cell (and `udfCalls` in `cell.get`)
+names the VBA functions it calls. Undo brings the saved result back. Saving writes the formula as it
+was read with its saved result, or with no result when it shows `#BLOCKED!`, so the next application
+calculates it; a range passed to a VBA function stays a plain range, not an array formula. VBA
+never runs. Known limits: a call whose formula also uses a defined name, `INDIRECT`, `OFFSET` or a
+volatile function such as `NOW` shows `#BLOCKED!` after any edit, and a structural edit (inserting
+or deleting rows, for example) keeps saved results.
+
 GridCraft can read a VBA project's source without running it. The reader follows the public
 [MS-OVBA] format and lists each module with its name, kind and source. While reading, it flags a
 module that holds compiled code but no source beyond `Attribute` lines as possible VBA stomping,
@@ -405,7 +419,8 @@ signed, diagnostics) and its modules in project order, each with its kind (`stan
 severity `info`, `warning` or `error`). `vba.source {module}` gives one module's full source; the
 name matches ignoring case, and a module's name is tried before its code name. A workbook without
 a VBA project lists no modules, and an unknown module is an error. The project is read on the
-first request, never when the workbook opens. Neither command runs VBA or opens a dialog, and both
+first request; on open, only when a formula calls a function GridCraft doesn't know (to find its
+VBA functions). Neither command runs VBA or opens a dialog, and both
 leave the workbook, its undo history and its unsaved-changes flag unchanged. They work from the
 CLI (`gridcraft-cli run --in book.xlsm --cmd vba.modules`), MCP (`execute_command`) and the
 control channel (`engine.execute`). In the window, Macros › View Code shows the same modules and
