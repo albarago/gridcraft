@@ -140,9 +140,13 @@ fn recase(rng: &mut Rng, s: &str) -> String {
     }
     s.chars().map(|c| if rng.chance(50) { if c.is_ascii_lowercase() { c.to_ascii_uppercase() } else { c.to_ascii_lowercase() } } else { c }).collect()
 }
-/// One `vba.modules` or `vba.source` call: a module's name (sometimes in another case), an
-/// unknown name, an empty, missing, null or non-text `module`, or a non-object params value.
+/// One `vba.analyze`, `vba.modules` or `vba.source` call: for `vba.source`, a module's name
+/// (sometimes in another case), an unknown name, an empty, missing, null or non-text `module`,
+/// or a non-object params value.
 fn query(rng: &mut Rng, names: &[String]) -> (&'static str, Json) {
+    if rng.chance(25) {
+        return ("vba.analyze", if rng.chance(80) { json!({}) } else { json!({"module": "ignored"}) });
+    }
     if rng.chance(30) {
         return ("vba.modules", if rng.chance(80) { json!({}) } else { json!({"module": "ignored"}) });
     }
@@ -211,8 +215,11 @@ fn p8_case(seed: u64) -> Result<(), String> {
         if let Err(EngineError::Internal(..)) = &r {
             return Err(format!("{}: a command panicked", what()));
         }
-        if id == "vba.modules" && r.is_err() {
-            return Err(format!("{}: vba.modules never fails on an open workbook", what()));
+        if (id == "vba.modules" || id == "vba.analyze") && r.is_err() {
+            return Err(format!("{}: {id} never fails on an open workbook", what()));
+        }
+        if id == "vba.analyze" && c.class == Class::None && r.as_ref().is_ok_and(|j| j["verdict"] != "noMacros") {
+            return Err(format!("{}: a workbook without a project must give noMacros", what()));
         }
         let known = params.get("module").and_then(Json::as_str).is_some_and(|m| c.names.iter().any(|n| n.eq_ignore_ascii_case(m)));
         if c.class == Class::Clean && id == "vba.source" && known && r.is_err() {
@@ -244,11 +251,11 @@ fn p8_case(seed: u64) -> Result<(), String> {
     }
     Ok(())
 }
-/// P8: `vba.modules` and `vba.source`, valid or not, leave the workbook (by value and by
-/// identity), the undo and redo lengths, the dirty flag, the revision, the selection and the
-/// journal exactly as they were.
+/// P8: `vba.modules`, `vba.source` and `vba.analyze`, valid or not, leave the workbook (by value
+/// and by identity, so also its `vba_project` bytes), the undo and redo lengths, the dirty flag,
+/// the revision, the selection and the journal exactly as they were.
 ///
-/// **Validates: Requirements 9.10**
+/// **Validates: Requirements 9.10, 13.15**
 #[test]
 fn p8_vba_queries_change_nothing() {
     let (seeds, _) = seed_list(1);

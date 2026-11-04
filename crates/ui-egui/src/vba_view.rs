@@ -2,8 +2,15 @@
 //! listed on the left, grouped standard, class, document, form and sorted by name ignoring case;
 //! the selected module's source shows on the right in the code editor, read only, with VBA
 //! colours. What reading the project found (signatures, stomping, parse failures) shows in a
-//! banner above the source. Everything comes from the `vba.modules` and `vba.source` queries:
-//! nothing here changes the workbook, and VBA never runs.
+//! banner above the source. Everything comes from the `vba.modules`, `vba.source` and
+//! `vba.analyze` queries: nothing here changes the workbook, and VBA never runs.
+//!
+//! The window has two tabs. **Source** is the list and the source. **Compatibility** shows the
+//! `vba.analyze` report as the command returns it (Req 13.14): the verdict and its reasons, the
+//! capability manifest (each present category opens to its occurrences), dynamic calls and
+//! whether the manifest may be incomplete, the flagged constructs, the procedures with their
+//! marks and the object-model members by use. The report is read once per open; long lists
+//! scroll in place and lay out only the rows in view.
 //!
 //! From the keyboard the list is one Tab stop (the selected module): Up, Down, Home and End move
 //! the selection across the groups, and Tab and Shift+Tab move between the list and the source.
@@ -233,8 +240,329 @@ fn banner(app: &SheetApp, ui: &mut Ui, items: &[&Diagnostic]) {
     ui.add_space(6.0);
 }
 
-/// The View Code window's body: the project line, the diagnostics banner, the module list and
-/// the selected module's source, read only.
+/// The window's tabs, as `d.tab` names them (English; the drawn labels are translated). An empty
+/// `d.tab` is the first.
+pub const TABS: [&str; 2] = ["Source", "Compatibility"];
+
+/// The compatibility report, read once per open with `vba.analyze` and kept in the dialog
+/// (`analysis`); a failure is kept as `analysisError`.
+fn load_analysis(app: &mut SheetApp, d: &mut Dialog) {
+    if d.values.contains_key("analysis") || d.values.contains_key("analysisError") {
+        return;
+    }
+    match app.run("vba.analyze", json!({})) {
+        Ok(v) => {
+            d.values.insert("analysis".into(), v);
+        }
+        Err(e) => {
+            d.values.insert("analysisError".into(), json!(crate::clean_error(&e)));
+        }
+    }
+}
+
+fn text<'a>(v: &'a Json, key: &str) -> &'a str {
+    v.get(key).and_then(Json::as_str).unwrap_or("")
+}
+fn number(v: &Json, key: &str) -> u64 {
+    v.get(key).and_then(Json::as_u64).unwrap_or(0)
+}
+
+/// The headline for a `vba.analyze` verdict, and the sentence under it.
+pub fn verdict_text(verdict: &str) -> (&'static str, &'static str) {
+    match verdict {
+        "usesUnsupportedFeatures" => ("Uses unsupported features", "The macros use something GridCraft won't support."),
+        "analysisOnly" => ("Analysis only", "Some of the code couldn't be read or isn't known yet, so this report may miss things."),
+        "wouldRunInFuturePhase" => ("Would run in a future phase", "Everything found is supported or planned."),
+        _ => ("No macros", "This workbook has no VBA modules."),
+    }
+}
+
+/// A reason of the verdict as one line: "Shell in Module1, line 3".
+pub fn reason_text(r: &Json) -> String {
+    let module = text(r, "module");
+    let line = r.get("line").and_then(Json::as_u64);
+    let at = match line {
+        Some(l) => format!("{module}, line {l}"),
+        None => module.to_string(),
+    };
+    match text(r, "rule") {
+        "flagged" => format!("{} in {at}", text(r, "flag")),
+        "memberNotPlanned" => format!("{} is not planned", text(r, "member")),
+        "unparsedModule" => format!("{at}: the code didn't parse"),
+        "unreadableModule" => format!("{module}: the source can't be read (it may have been removed)"),
+        "memberUnknown" => format!("{} is not in the member catalog", text(r, "member")),
+        "allKnown" => "Nothing unsupported or unknown was found".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// A capability category's name.
+pub fn category_text(category: &str) -> &'static str {
+    match category {
+        "fileRead" => "File read",
+        "fileWrite" => "File write",
+        "network" => "Network",
+        "process" => "Processes and native code",
+        "registry" => "Registry",
+        "clipboard" => "Clipboard",
+        "uiDialogs" => "Dialogs",
+        "eventHandlers" => "Event handlers",
+        "autoExec" => "Runs on open or close",
+        _ => "Other",
+    }
+}
+
+/// Where a span is: "Module1, line 3, columns 5–18" (or "lines 3–5" when it spans lines).
+pub fn span_text(module: &str, s: &Json) -> String {
+    let (l1, c1, l2, c2) = (number(s, "startLine"), number(s, "startCol"), number(s, "endLine"), number(s, "endCol"));
+    if l1 == l2 { format!("{module}, line {l1}, columns {c1}–{c2}") } else { format!("{module}, lines {l1}–{l2}") }
+}
+
+/// A flag as one line: "Shell: Module1, line 3", with the ProgID of CreateObject/GetObject.
+pub fn flag_text(f: &Json) -> String {
+    let (start, end) = (number(f, "startLine"), number(f, "endLine"));
+    let lines = if start == end { format!("line {start}") } else { format!("lines {start}–{end}") };
+    let mut s = format!("{}: {}, {lines}", text(f, "kind"), text(f, "module"));
+    if let Some(p) = f.get("progId").and_then(Json::as_str) {
+        s.push_str(&format!(" (ProgID {p})"));
+    }
+    s
+}
+
+/// A procedure kind as VBA writes it.
+pub fn proc_kind_text(kind: &str) -> &str {
+    match kind {
+        "sub" => "Sub",
+        "function" => "Function",
+        "propertyGet" => "Property Get",
+        "propertyLet" => "Property Let",
+        "propertySet" => "Property Set",
+        other => other,
+    }
+}
+
+/// A procedure's marks, comma separated.
+pub fn marks_text(p: &Json) -> String {
+    let words: Vec<&str> = p
+        .get("marks")
+        .and_then(Json::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Json::as_str)
+        .map(|m| match m {
+            "entryPoint" => "entry point",
+            "udfCandidate" => "UDF candidate",
+            "eventHandler" => "event handler",
+            "autoExec" => "auto-exec",
+            other => other,
+        })
+        .collect();
+    words.join(", ")
+}
+
+/// A member's catalog status.
+pub fn status_text(status: &str) -> &str {
+    match status {
+        "supported" => "supported",
+        "planned" => "planned",
+        "notPlanned" => "not planned",
+        "unknown" => "unknown",
+        other => other,
+    }
+}
+
+/// A member as written: `object.member`, or `.member` when it has no object.
+pub fn member_text(m: &Json) -> String {
+    match m.get("object").and_then(Json::as_str) {
+        Some(o) => format!("{o}.{}", text(m, "member")),
+        None => format!(".{}", text(m, "member")),
+    }
+}
+
+/// Why a manifest is incomplete, as one line.
+pub fn incomplete_text(r: &Json) -> String {
+    match (text(r, "kind"), r.get("module").and_then(Json::as_str)) {
+        ("dynamic", _) => "dynamic calls: unknown capabilities".to_string(),
+        ("unparsedModule", Some(m)) => format!("{m}: unparsed module, capabilities unknown"),
+        ("unreadableModule", Some(m)) => format!("{m}: unreadable module, capabilities unknown"),
+        (kind, m) => format!("{kind} {}", m.unwrap_or("")),
+    }
+}
+
+fn items(v: &Json) -> &[Json] {
+    v.as_array().map_or(&[], Vec::as_slice)
+}
+
+/// A section heading in the report, announced as a heading.
+fn heading(ui: &mut Ui, t: &Tokens, label: &str) {
+    ui.add_space(8.0);
+    let h = ui.label(egui::RichText::new(label).font(theme::ui_font(13.0)).strong().color(t.text));
+    ui.ctx().accesskit_node_builder(h.id, |node| node.set_role(egui::Role::Heading));
+}
+
+/// One line per item in a scroll area of at most `max_height`, laid out only for the rows in
+/// view, so a report of thousands of members or procedures stays quick.
+fn rows(ui: &mut Ui, id: &str, count: usize, max_height: f32, mut row: impl FnMut(&mut Ui, usize)) {
+    if count == 0 {
+        return;
+    }
+    let height = ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y;
+    egui::ScrollArea::vertical().id_salt(id).max_height(max_height).auto_shrink([false, true]).show_rows(ui, height, count, |ui, range| {
+        for i in range {
+            row(ui, i);
+        }
+    });
+}
+
+/// A table cell of `width`, its text cut short with "…" when it doesn't fit.
+fn cell(ui: &mut Ui, width: f32, text: impl Into<egui::WidgetText>) {
+    ui.allocate_ui_with_layout(vec2(width, ui.text_style_height(&egui::TextStyle::Body)), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        ui.set_width(width);
+        ui.add(egui::Label::new(text).truncate());
+    });
+}
+
+/// The Compatibility tab: the `vba.analyze` report, as the command returns it (Req 13.14).
+fn compatibility(app: &mut SheetApp, ui: &mut Ui, d: &mut Dialog, height: f32) {
+    load_analysis(app, d);
+    let t = Tokens::get(ui.ctx());
+    let lang = app.ui.language;
+    if let Some(e) = d.values.get("analysisError").and_then(Json::as_str) {
+        ui.label(egui::RichText::new(e).color(t.danger));
+        return;
+    }
+    let Some(r) = d.values.get("analysis") else { return };
+    egui::ScrollArea::vertical().id_salt("vba_compat").max_height(height).auto_shrink([false, false]).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        // The verdict and its reasons.
+        let verdict = text(r, "verdict");
+        let (headline, sentence) = verdict_text(verdict);
+        let (bg, border, word) = match verdict {
+            "usesUnsupportedFeatures" => (t.notice_warn_bg, t.danger, t.danger),
+            "analysisOnly" => (t.notice_warn_bg, t.notice_warn_border, t.text),
+            _ => (t.notice_info_bg, t.notice_info_border, t.text),
+        };
+        egui::Frame::new().fill(bg).stroke(egui::Stroke::new(1.0, border)).corner_radius(4.0).inner_margin(8.0).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let h = ui
+                .label(egui::RichText::new(format!("{}: {}", lang.tr("Verdict"), lang.tr(headline))).font(theme::ui_font(15.0)).strong().color(word));
+            ui.ctx().accesskit_node_builder(h.id, |node| node.set_role(egui::Role::Heading));
+            ui.add(egui::Label::new(egui::RichText::new(lang.tr(sentence)).color(t.text)).wrap());
+            let reasons = items(&r["reasons"]);
+            rows(ui, "vba_compat_reasons", reasons.len(), 140.0, |ui, i| {
+                if let Some(reason) = reasons.get(i) {
+                    ui.add(egui::Label::new(format!("• {}", reason_text(reason))).truncate());
+                }
+            });
+        });
+
+        // What the code could do.
+        heading(ui, &t, lang.tr("Capabilities"));
+        let m = &r["manifest"];
+        for c in items(&m["categories"]) {
+            let id = text(c, "category");
+            let name = lang.tr(category_text(id));
+            let spans = items(&c["spans"]);
+            if c.get("present").and_then(Json::as_bool) == Some(true) {
+                let label = format!("{name}: {} ({})", lang.tr("present"), spans.len());
+                egui::CollapsingHeader::new(egui::RichText::new(label).strong()).id_salt(("vba_cap", id)).show(ui, |ui| {
+                    rows(ui, &format!("vba_cap_rows_{id}"), spans.len(), 160.0, |ui, i| {
+                        if let Some(s) = spans.get(i) {
+                            ui.add(egui::Label::new(format!("{} — {}", text(s, "construct"), span_text(text(s, "module"), s))).truncate());
+                        }
+                    });
+                });
+            } else {
+                ui.label(egui::RichText::new(format!("{name}: {}", lang.tr("absent"))).color(t.text_dim));
+            }
+        }
+        let dynamic = items(&m["dynamic"]);
+        if !dynamic.is_empty() {
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(lang.tr("Dynamic calls (capabilities unknown)")).strong());
+            rows(ui, "vba_compat_dynamic", dynamic.len(), 120.0, |ui, i| {
+                if let Some(x) = dynamic.get(i) {
+                    ui.add(egui::Label::new(format!("{} — {}", text(x, "construct"), span_text(text(x, "module"), &x["span"]))).truncate());
+                }
+            });
+        }
+        if m.get("incomplete").and_then(Json::as_bool) == Some(true) {
+            ui.add_space(4.0);
+            egui::Frame::new().fill(t.notice_warn_bg).stroke(egui::Stroke::new(1.0, t.notice_warn_border)).inner_margin(6.0).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.add(egui::Label::new(egui::RichText::new(lang.tr("This list may be incomplete.")).strong().color(t.text)).wrap());
+                for reason in items(&m["incompleteReasons"]) {
+                    ui.add(egui::Label::new(egui::RichText::new(incomplete_text(reason)).color(t.text)).wrap());
+                }
+            });
+        }
+
+        // Flagged constructs.
+        let flags = items(&r["flags"]);
+        heading(ui, &t, &format!("{} ({})", lang.tr("Flagged constructs"), flags.len()));
+        if flags.is_empty() {
+            ui.label(egui::RichText::new(lang.tr("None.")).color(t.text_dim));
+        }
+        rows(ui, "vba_compat_flags", flags.len(), 160.0, |ui, i| {
+            if let Some(f) = flags.get(i) {
+                ui.add(egui::Label::new(flag_text(f)).truncate());
+            }
+        });
+
+        // Procedures.
+        let procs = items(&r["procedures"]);
+        heading(ui, &t, &format!("{} ({})", lang.tr("Procedures"), procs.len()));
+        if procs.is_empty() {
+            ui.label(egui::RichText::new(lang.tr("None.")).color(t.text_dim));
+        } else {
+            let widths = [150.0, 190.0, 110.0];
+            ui.horizontal(|ui| {
+                for (w, h) in widths.iter().zip(["Module", "Name", "Kind"]) {
+                    cell(ui, *w, egui::RichText::new(lang.tr(h)).strong());
+                }
+                ui.label(egui::RichText::new(lang.tr("Marks")).strong());
+            });
+            rows(ui, "vba_compat_procs", procs.len(), 220.0, |ui, i| {
+                let Some(p) = procs.get(i) else { return };
+                ui.horizontal(|ui| {
+                    cell(ui, widths[0], text(p, "module"));
+                    cell(ui, widths[1], text(p, "name"));
+                    cell(ui, widths[2], proc_kind_text(text(p, "kind")));
+                    ui.add(egui::Label::new(marks_text(p)).truncate());
+                });
+            });
+        }
+
+        // Object-model members, most used first.
+        let members = items(&r["members"]);
+        heading(ui, &t, &format!("{} ({})", lang.tr("Members"), members.len()));
+        if members.is_empty() {
+            ui.label(egui::RichText::new(lang.tr("None.")).color(t.text_dim));
+        } else {
+            let widths = [280.0, 70.0];
+            ui.horizontal(|ui| {
+                for (w, h) in widths.iter().zip(["Member", "Uses"]) {
+                    cell(ui, *w, egui::RichText::new(lang.tr(h)).strong());
+                }
+                ui.label(egui::RichText::new(lang.tr("Status")).strong());
+            });
+            rows(ui, "vba_compat_members", members.len(), 220.0, |ui, i| {
+                let Some(mm) = members.get(i) else { return };
+                ui.horizontal(|ui| {
+                    cell(ui, widths[0], member_text(mm));
+                    cell(ui, widths[1], number(mm, "count").to_string());
+                    let status = text(mm, "status");
+                    let color = if status == "notPlanned" { t.danger } else { t.text };
+                    ui.add(egui::Label::new(egui::RichText::new(lang.tr(status_text(status))).color(color)).truncate());
+                });
+            });
+        }
+    });
+}
+
+/// The View Code window's body: the project line, the diagnostics banner, the Source and
+/// Compatibility tabs, and on the Source tab the module list and the selected module's source,
+/// read only.
 pub fn view(app: &mut SheetApp, ui: &mut Ui, d: &mut Dialog, open: &mut bool) {
     // The window shows the workbook it opened on: another workbook becoming active closes it.
     let active = app.session.active().map(|doc| doc.uid);
@@ -262,13 +590,33 @@ pub fn view(app: &mut SheetApp, ui: &mut Ui, d: &mut Dialog, open: &mut bool) {
     ui.label(egui::RichText::new(lang.tr(KEPT)).color(t.text_dim));
     ui.add_space(6.0);
 
+    // The tabs. `d.tab` keeps the English name (what `ui.dialog.set` passes); the labels are
+    // translated.
+    ui.horizontal(|ui| {
+        for tab in TABS {
+            let on = d.tab == tab || (d.tab.is_empty() && tab == TABS[0]);
+            if ui.selectable_label(on, lang.tr(tab)).clicked() {
+                d.tab = tab.to_string();
+            }
+        }
+    });
+    ui.separator();
+    let compat = d.tab == TABS[1];
+
+    // The project's diagnostics, and on the Source tab the selected module's.
     let module = list.module(&selected).cloned();
     let mut items: Vec<&Diagnostic> = list.diagnostics.iter().collect();
-    if let Some(m) = &module {
+    if let Some(m) = module.as_ref().filter(|_| !compat) {
         items.extend(m.diagnostics.iter());
     }
     banner(app, ui, &items);
 
+    if compat {
+        let height = (ui.available_height() - 8.0).max(240.0);
+        compatibility(app, ui, d, height);
+        d.values.insert("module".into(), json!(selected));
+        return;
+    }
     if let Some(m) = &module {
         load_source(app, d, &m.name);
     }
@@ -431,6 +779,30 @@ mod tests {
         assert_eq!(step(1, 0, Key::ArrowDown), 0);
         assert_eq!(step(3, usize::MAX, Key::ArrowDown), 2);
     }
+    #[test]
+    fn report_lines_read_the_analyze_json() {
+        assert_eq!(reason_text(&json!({"rule": "flagged", "flag": "Shell", "module": "M", "line": 3})), "Shell in M, line 3");
+        assert_eq!(reason_text(&json!({"rule": "unparsedModule", "module": "U", "line": 2})), "U, line 2: the code didn't parse");
+        assert_eq!(reason_text(&json!({"rule": "memberUnknown", "member": "Range.Value"})), "Range.Value is not in the member catalog");
+        assert_eq!(reason_text(&json!({"rule": "allKnown"})), "Nothing unsupported or unknown was found");
+        assert_eq!(
+            flag_text(&json!({"kind": "CreateObject", "module": "M", "startLine": 4, "endLine": 5, "progId": "WScript.Shell"})),
+            "CreateObject: M, lines 4–5 (ProgID WScript.Shell)"
+        );
+        assert_eq!(flag_text(&json!({"kind": "Shell", "module": "M", "startLine": 2, "endLine": 2})), "Shell: M, line 2");
+        assert_eq!(span_text("M", &json!({"startLine": 2, "startCol": 3, "endLine": 2, "endCol": 18})), "M, line 2, columns 3–18");
+        assert_eq!(span_text("M", &json!({"startLine": 1, "startCol": 1, "endLine": 4, "endCol": 7})), "M, lines 1–4");
+        assert_eq!(marks_text(&json!({"marks": ["eventHandler", "autoExec"]})), "event handler, auto-exec");
+        assert_eq!(member_text(&json!({"object": null, "member": "Value"})), ".Value");
+        assert_eq!(member_text(&json!({"object": "ws", "member": "Range"})), "ws.Range");
+        assert_eq!(verdict_text("noMacros").0, "No macros");
+        assert_eq!(verdict_text("usesUnsupportedFeatures").0, "Uses unsupported features");
+        for c in ["fileRead", "fileWrite", "network", "process", "registry", "clipboard", "uiDialogs", "eventHandlers", "autoExec"] {
+            assert_ne!(category_text(c), "Other", "{c}");
+        }
+        assert_eq!(incomplete_text(&json!({"kind": "dynamic"})), "dynamic calls: unknown capabilities");
+    }
+
     #[test]
     fn module_labels_name_the_module_and_its_kind() {
         let en = crate::i18n::Language::En;

@@ -1,6 +1,6 @@
 //! Reads VBA projects (`vbaProject.bin`) from their public specifications ([MS-OVBA]) and lexes
-//! and parses module source ([MS-VBAL]), and prints syntax trees back as source. Read-only:
-//! nothing here runs VBA.
+//! and parses module source ([MS-VBAL]), prints syntax trees back as source, and reports what
+//! the source uses ([`mod@analyze`]). Read-only: nothing here runs VBA.
 //!
 //! The crate depends on `gridcraft-core` only, so it stays small, wasm-safe and usable outside
 //! the workbook stack. It never opens the compound file itself: callers hand it the streams.
@@ -25,6 +25,7 @@
 //! [MS-VBAL]: https://learn.microsoft.com/en-us/openspecs/microsoft_general_purpose_programming_languages/ms-vbal/
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
+pub mod analyze;
 pub mod ast;
 pub mod diag;
 pub mod dir;
@@ -40,6 +41,10 @@ pub mod project_stream;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testutil;
 
+pub use analyze::{
+    CapSpan, Capability, CapabilityManifest, CategoryEntry, CompatibilityReport, DynamicUse, EmptyCatalog, Flag, FlagKind, IncompleteReason, Mark,
+    MemberCatalog, MemberStatus, MemberUse, ParamInfo, ProcInfo, ProgId, Reason, Verdict, VerdictRule, analyze,
+};
 pub use ast::Module;
 pub use diag::{Diag, DiagCode, Severity};
 pub use dir::ReferenceKind;

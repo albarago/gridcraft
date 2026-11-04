@@ -1,6 +1,6 @@
 # Macros
 
-> **Last updated:** 2026-11-03 · **Change:** minor (View Code in the Macros dialog shows a workbook's VBA modules and source, read only; earlier: `vba.modules` and `vba.source` read a workbook's VBA modules and source, read-only, from the CLI, MCP and the control channel; earlier: a workbook's VBA source can be read without running it; possible VBA stomping is flagged, signed projects are reported as signed (not verified), and compiled code is not checked against the source; saving a signed workbook doesn't keep its signature part yet; earlier: a close that waits on the step editor's question runs in the editor's window, and a further close asked meanwhile waits for the answer or is refused; earlier: closing a workbook or quitting asks about the step editor's unsaved draft first; recording macros and the management commands; Record Macro takes a name, shortcut and description; the macro interface: Automate › Macros, the Macros and Record Macro dialogs, the step editor, shortcuts)
+> **Last updated:** 2026-11-04 · **Change:** minor (`vba.analyze` returns the VBA compatibility report, View Code gains a Compatibility tab and colours source from the VBA lexer, and a stomped module with only `Attribute` lines counts as unreadable; earlier: the VBA compatibility analyzer lists a capability manifest of nine categories from a checked-in trigger table, marks it incomplete for dynamic dispatch and for unparsed or unreadable modules, and says which categories the script sandbox can't enforce yet; earlier: View Code in the Macros dialog shows a workbook's VBA modules and source, read only; earlier: `vba.modules` and `vba.source` read a workbook's VBA modules and source, read-only, from the CLI, MCP and the control channel; earlier: a workbook's VBA source can be read without running it; possible VBA stomping is flagged, signed projects are reported as signed (not verified), and compiled code is not checked against the source; saving a signed workbook doesn't keep its signature part yet; earlier: a close that waits on the step editor's question runs in the editor's window, and a further close asked meanwhile waits for the answer or is refused; earlier: closing a workbook or quitting asks about the step editor's unsaved draft first; recording macros and the management commands; Record Macro takes a name, shortcut and description; the macro interface: Automate › Macros, the Macros and Record Macro dialogs, the step editor, shortcuts)
 
 GridCraft macros are typed, declarative lists of commands, not VBA. Every step runs a GridCraft
 command (the same ids the ribbon, CLI and MCP use) or one of three bounded control steps. A macro
@@ -286,12 +286,18 @@ other macros open; a macro that was left out is not in the saved file.
   keeps the project when you save but does not run it, and a banner with what reading found (the
   project's notes and the selected module's warnings, such as possible stomping). The modules are
   listed on the left under Modules, Class Modules, Document Modules and Forms, sorted by name
-  ignoring case, with the first one selected; its source shows on the right with VBA colours. The
+  ignoring case, with the first one selected; its source shows on the right, coloured from the
+  VBA lexer's tokens (keywords, strings, numbers and dates, comments, and in the error colour
+  what the lexer couldn't read, such as an unclosed string). The
   source can be selected and copied, but typing, paste, cut and delete change nothing, in the view
   or the workbook. A module with no stored source says so. Up, Down, Home and End move through
   the modules, Tab and Shift+Tab move between the list and the source, and a screen reader hears
-  each module as its name and kind and the source as "Source of" the module. It reads through
-  `vba.modules` and `vba.source`, and works the same in the web build.
+  each module as its name and kind and the source as "Source of" the module. The window has two
+  tabs: Source (the list and the source) and Compatibility, which shows the `vba.analyze` report:
+  the verdict with its reasons, the nine capabilities (a present one opens to each place it
+  occurs), dynamic calls and whether the list may be incomplete, the flagged constructs, the
+  procedures with their marks, and the members by use with their status. It reads through
+  `vba.modules`, `vba.source` and `vba.analyze`, and works the same in the web build.
 - **Step editor.** A resizable window that works on a draft and saves it with `macro.save`; in a
   narrow app window it is no larger than the window and its toolbar wraps onto a second row. The
   step list shows each step's number, a breakpoint dot in the gutter (click to set or clear), a
@@ -358,7 +364,7 @@ other module that holds compiled code is reported as not checked, and source rep
 code is not detected. Saving a signed workbook doesn't keep the package's signature part today, so
 the saved `.xlsm` or `.xltm` is unsigned.
 
-Two read-only query commands expose the project: `vba.modules` lists the project (name, code page,
+Read-only query commands expose the project, `vba.analyze` (below) among them: `vba.modules` lists the project (name, code page,
 signed, diagnostics) and its modules in project order, each with its kind (`standard`, `class`,
 `document` or `form`), code name, line count and diagnostics (`{code, severity, module, message}`,
 severity `info`, `warning` or `error`). `vba.source {module}` gives one module's full source; the
@@ -370,6 +376,52 @@ CLI (`gridcraft-cli run --in book.xlsm --cmd vba.modules`), MCP (`execute_comman
 control channel (`engine.execute`). In the window, Macros › View Code shows the same modules and
 source, read only (see [In the window](#in-the-window)). Editing VBA isn't possible.
 
+The compatibility analyzer reads the parsed source and lists what the project could do, in a
+capability manifest of nine categories, always in this order: `fileRead`, `fileWrite`,
+`network`, `process`, `registry`, `clipboard`, `uiDialogs`, `eventHandlers` and `autoExec`.
+Each is present or absent, and a present one lists every occurrence with its module and its first
+and last line and column. A checked-in trigger table (`crates/vba/src/analyze/triggers.rs`) says
+which constructs set each category, for example `Open … For Input` and `Dir` for `fileRead`,
+`Kill` and `SaveAs` for `fileWrite`, `CreateObject("MSXML2.…")` for `network`, `Shell`,
+`Declare` and `CreateObject("WScript.Shell")` for `process`, `GetSetting` for `registry`,
+`DataObject` for `clipboard`, `MsgBox` and a form's `.Show` for `uiDialogs`, and the event
+handler and auto-exec procedures. The manifest is marked incomplete when the source uses dynamic
+dispatch it can't follow (`CallByName`, `Application.Run` or `Evaluate` with a non-literal
+argument, `CreateObject`/`GetObject` with a non-literal ProgID; each is listed with its place),
+when a module didn't parse, or when a module has no readable source: possible stomping (the
+source is empty or only `Attribute` lines), or empty source with a missing, truncated or corrupt
+module stream or a module offset past its end. An empty module with only other diagnostics, such
+as a kind taken from its MODULETYPE record, is just empty. A module with
+no readable source also makes the report "analysis only".
+
+`vba.analyze` returns the whole report, read-only like the other two commands: the verdict
+(`noMacros`, `usesUnsupportedFeatures`, `analysisOnly` or `wouldRunInFuturePhase`) and one
+reason per matching condition, the procedures with their parameters, lines and marks
+(`entryPoint`, `udfCandidate`, `eventHandler`, `autoExec`), the object-model members with their
+use count and catalog status, the flagged constructs (`Declare`, `CreateObject`, `GetObject`,
+`Shell`, `SendKeys`, `ActiveX`, `ExecuteExcel4Macro`, with the ProgID when there is one), the
+unparsed and unreadable modules, and the manifest. Until the member catalog is checked in, every
+member's status is `unknown`, so a project that references members is "analysis only" at best. A
+workbook without a VBA project gives `noMacros` with empty lists, not an error. The report is
+computed on the first request and kept with the read project.
+
+GridCraft can't yet enforce any of these categories on VBA: nothing runs VBA, and the script
+sandbox has no named categories. While a script or a macro step without the file permission runs,
+the sandbox (`ScriptSandbox`) refuses every read and every write through the engine's file
+functions, as one switch. No category takes a sandbox name, because there is none to reuse.
+
+| Category | Script sandbox equivalent |
+|---|---|
+| `fileRead` | Partial: the sandbox refuses all file reads (`read_file`), but can't allow reads without writes |
+| `fileWrite` | Partial: the sandbox refuses all file writes (`write_file`), but can't allow writes without reads |
+| `network` | Not yet enforceable |
+| `process` | Not yet enforceable |
+| `registry` | Not yet enforceable |
+| `clipboard` | Not yet enforceable |
+| `uiDialogs` | Not yet enforceable |
+| `eventHandlers` | Not yet enforceable |
+| `autoExec` | Not yet enforceable |
+
 ```text
 {"command": "vba.modules", "params": {}}
 → {"project": {"name": "VBAProject", "codePage": 1252, "signed": false, "diagnostics": []},
@@ -380,6 +432,22 @@ source, read only (see [In the window](#in-the-window)). Editing VBA isn't possi
 
 {"command": "vba.source", "params": {"module": "module1"}}
 → {"module": "Module1", "source": "Attribute VB_Name = \"Module1\"\r\nSub Hello()\r\n..."}
+
+{"command": "vba.analyze", "params": {}}
+→ {"verdict": "usesUnsupportedFeatures",
+   "reasons": [{"rule": "flagged", "flag": "Shell", "module": "Module1", "line": 3}],
+   "procedures": [{"module": "Module1", "name": "Hello", "kind": "sub", "params": [],
+                   "startLine": 2, "endLine": 4, "marks": ["entryPoint"]}],
+   "members": [],
+   "flags": [{"kind": "Shell", "module": "Module1", "startLine": 3, "endLine": 3}],
+   "unparsed": [], "unreadable": [],
+   "manifest": {"categories": [{"category": "fileRead", "present": false, "spans": []}, ...,
+                  {"category": "process", "present": true, "spans": [{"module": "Module1",
+                   "startLine": 3, "startCol": 3, "endLine": 3, "endCol": 18, "construct": "Shell"}]}, ...],
+                "dynamic": [], "incomplete": false, "incompleteReasons": []}}
 ```
+
+In the reply, `flag` (on a `flagged` reason), `module`, `line` and `member` of a reason, `progId`
+of a flag and `module` of an incomplete reason are left out when there is nothing to say.
 
 [MS-OVBA]: https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-ovba/
