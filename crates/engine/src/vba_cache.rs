@@ -19,7 +19,7 @@
 use std::sync::{Arc, Weak};
 
 use gridcraft_model::Workbook;
-use gridcraft_vba::{CompatibilityReport, EmptyCatalog, Limits, VbaProject};
+use gridcraft_vba::{CompatibilityReport, ExcelCatalog, Limits, VbaProject};
 
 /// Most parsed projects kept: a handful of open workbooks, with room for edits in between.
 pub(crate) const MAX_SLOTS: usize = 16;
@@ -43,10 +43,9 @@ pub(crate) struct VbaCache {
     pub(crate) analyses: usize,
 }
 
-/// The analyzer run the engine uses: the checked-in catalog once it exists (task 12), until then
-/// [`EmptyCatalog`].
+/// The analyzer run the engine uses, with the checked-in Excel member catalog.
 fn analyze(project: &VbaProject) -> CompatibilityReport {
-    gridcraft_vba::analyze(project, &EmptyCatalog)
+    gridcraft_vba::analyze(project, &ExcelCatalog)
 }
 
 impl VbaCache {

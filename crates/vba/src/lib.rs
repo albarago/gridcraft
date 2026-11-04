@@ -1,6 +1,6 @@
 //! Reads VBA projects (`vbaProject.bin`) from their public specifications ([MS-OVBA]) and lexes
 //! and parses module source ([MS-VBAL]), prints syntax trees back as source, and reports what
-//! the source uses ([`mod@analyze`]). Read-only: nothing here runs VBA.
+//! the source uses ([`mod@analyze`]) against the checked-in Excel member catalog ([`catalog`]). Read-only: nothing here runs VBA.
 //!
 //! The crate depends on `gridcraft-core` only, so it stays small, wasm-safe and usable outside
 //! the workbook stack. It never opens the compound file itself: callers hand it the streams.
@@ -27,6 +27,7 @@
 #![forbid(unsafe_code)]
 pub mod analyze;
 pub mod ast;
+pub mod catalog;
 pub mod diag;
 pub mod dir;
 pub mod encoding;
@@ -46,6 +47,7 @@ pub use analyze::{
     MemberCatalog, MemberStatus, MemberUse, ParamInfo, ProcInfo, ProgId, Reason, Verdict, VerdictRule, analyze,
 };
 pub use ast::Module;
+pub use catalog::ExcelCatalog;
 pub use diag::{Diag, DiagCode, Severity};
 pub use dir::ReferenceKind;
 pub use lexer::{Keyword, LexError, MAX_SOURCE, SourceTooLarge, Span, Token, TokenKind, lex};
