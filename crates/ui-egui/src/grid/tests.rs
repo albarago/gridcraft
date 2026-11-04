@@ -304,3 +304,11 @@ fn upward_text_with_middle_align_is_centred_in_a_merged_block() {
     assert!((bb.center().y - rect.center().y).abs() < 0.01, "{bb:?} not centred in {rect:?}");
     assert!((bb.center().x - rect.center().x).abs() < 0.01, "{bb:?} not centred in {rect:?}");
 }
+#[test]
+fn the_udf_note_names_every_function_without_the_xludf_prefix() {
+    use super::show::udf_blocked_tip;
+    let calls = ["TWICE".to_owned(), "_xludf.HALF".to_owned(), "_XLUDF.x".to_owned()];
+    let [names, why] = udf_blocked_tip(crate::i18n::Language::En, &calls);
+    assert_eq!(names, "Calls VBA functions: TWICE, HALF, x");
+    assert!(why.contains("not executed") && why.contains("#BLOCKED!"), "{why}");
+}

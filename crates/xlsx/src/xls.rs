@@ -851,6 +851,11 @@ fn defined_names(g: &Globals, model_index: &[Option<usize>], wb: &mut Workbook, 
         model_index.get(usize::from(itab) - 1).copied().flatten().map(Some)
     };
     for lbl in &g.names {
+        // A macro name is skipped below, but calc needs to know a formula calling it calls a VBA
+        // function (Req 17.1); a function macro usually has no formula, so take it first.
+        if lbl.macro_name && lbl.builtin.is_none() && !lbl.name.is_empty() {
+            wb.xls_macro_names.push(lbl.name.clone());
+        }
         let Some(scope) = scope_of(lbl.itab) else { continue };
         let text = match decode(&lbl.rgce, &lbl.rgcb, CellRef::new(0, 0), Mode::Name, &g.links) {
             Ok(e) => gridcraft_formula::print(&e),
@@ -877,4 +882,6 @@ fn defined_names(g: &Globals, model_index: &[Option<usize>], wb: &mut Workbook, 
             None => wb.names.push(DefinedName { name: lbl.name.clone(), scope, formula: text, comment: String::new(), hidden: lbl.hidden }),
         }
     }
+    wb.xls_macro_names.sort_unstable();
+    wb.xls_macro_names.dedup();
 }

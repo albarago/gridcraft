@@ -220,7 +220,8 @@ fn user_defined_prefix_is_hidden_while_editing_and_kept_on_commit() {
     assert_eq!(app.editor.as_ref().unwrap().text, "=EOMONTH()&CONCAT(\"_xludf.x\")");
     assert!(app.commit_edit(0, 0, false, false));
     assert_eq!(formula(&app), "_xludf.EOMONTH()&_xludf.CONCAT(\"_xludf.x\")");
-    assert_eq!(app.session.active().unwrap().wb.active().unwrap().value(CellRef::new(0, 0)), Value::Error(CellError::Name));
+    // A user-defined call is never run: `#BLOCKED!`, not the built-in's result (Req 17.7).
+    assert_eq!(app.session.active().unwrap().wb.active().unwrap().value(CellRef::new(0, 0)), Value::Error(CellError::Blocked));
     app.run("app.language.set", json!({"language":"es"})).unwrap();
     app.begin_edit(None, true);
     assert_eq!(app.editor.as_ref().unwrap().text, "=EOMONTH()&CONCAT(\"_xludf.x\")");

@@ -276,10 +276,11 @@ fn errors_and_cycles() {
     assert!(t.get("B1").is_error());
     t.set("C1", "=NOSUCHFN(1)");
     assert_eq!(t.get("C1"), Value::Error(CellError::Name));
-    // `_xludf.` marks a user-defined function, never the built-in of the same name (#726).
+    // `_xludf.` marks a user-defined function, never the built-in of the same name (#726): a
+    // UDF call, which is never run, so it is #BLOCKED! (Req 17.7).
     for f in ["=_xludf.CONCAT(\"a\",\"b\")", "=_xludf.SUM(1,2)", "=_xludf.EOMONTH()"] {
         t.set("C3", f);
-        assert_eq!(t.get("C3"), Value::Error(CellError::Name), "{f}");
+        assert_eq!(t.get("C3"), Value::Error(CellError::Blocked), "{f}");
     }
     t.set("C2", "=1+");
     assert_eq!(t.get("C2"), Value::Error(CellError::Name));
@@ -2371,4 +2372,231 @@ fn formulas_read_a_dirty_python_cell_after_it_is_laid_out() {
     t.set("B2", "");
     assert_eq!((t.num("B1"), t.num("B2")), (5.0, 6.0));
     assert_eq!((t.num("A1"), t.num("A2"), t.num("A3")), (5.0, 100.0, 111.0));
+}
+
+/// Req 17.1, 17.2: which calls are UDF calls.
+#[test]
+fn udf_calls_are_xludf_or_named_and_never_built_ins() {
+    use crate::UdfNames;
+    let udf = UdfNames::new(["diagonalWert", "Sum", ""]);
+    assert_eq!(udf.names().collect::<Vec<_>>(), ["DIAGONALWERT", "SUM"]);
+    // The prefix makes a UDF call whatever the name, even a built-in's (#726).
+    for n in ["_xludf.FOO", "_xludf.SUM", "_XLUDF.bar"] {
+        assert!(udf.is_udf_call(n), "{n}");
+        assert!(UdfNames::default().is_udf_call(n), "{n} without names");
+    }
+    // A name in the set, case-insensitively.
+    assert!(udf.is_udf_call("DIAGONALWERT"));
+    assert!(udf.is_udf_call("diagonalwert"));
+    // A built-in wins over the set, special forms too.
+    for n in ["SUM", "IF", "LET", "INDIRECT"] {
+        assert!(!UdfNames::new([n]).is_udf_call(n), "{n}");
+    }
+    // An unknown name not in the set, and Google Sheets' `__xludf.` wrapper, are not.
+    assert!(!udf.is_udf_call("NOSUCHFN"));
+    assert!(!udf.is_udf_call("__XLUDF.DUMMYFUNCTION"));
+    assert!(!UdfNames::default().is_udf_call("DIAGONALWERT"));
+}
+
+#[test]
+fn udf_calls_lists_nested_calls_once() {
+    let udf = crate::UdfNames::new(["DIAGONALWERT"]);
+    let wb = Workbook::new();
+    let calls = |f: &str| udf.udf_calls(&wb, 0, &gridcraft_formula::parse(f).unwrap());
+    assert_eq!(calls("=1+DIAGONALWERT(A1)*_xludf.Bar(B1,diagonalwert(SUM(C1)))+NOSUCHFN(D1)"), ["DIAGONALWERT", "_xludf.BAR"]);
+    assert!(calls("=SUM(A1)").is_empty());
+    // A long operator chain is walked without recursion.
+    let long = format!("={}", vec!["_xludf.F(A1)"; 600].join("+"));
+    assert_eq!(calls(&long), ["_xludf.F"]);
+}
+
+/// Req 17.2: a workbook defined name (a LAMBDA), or a name the formula binds with LET or as a
+/// LAMBDA parameter, wins over a VBA `Function` of the same name.
+#[test]
+fn defined_and_bound_names_win_over_udf_names() {
+    use crate::UdfNames;
+    let mut t = T::new();
+    t.wb.names.push(gridcraft_model::DefinedName {
+        name: "Twice".into(),
+        scope: None,
+        formula: "LAMBDA(x,x*2)".into(),
+        comment: String::new(),
+        hidden: false,
+    });
+    t.calc.set_udf_names(&t.wb, UdfNames::new(["TWICE", "THRICE", "HALF"]));
+    let calls = |t: &T, f: &str| t.calc.udf_calls(&t.wb, 0, &gridcraft_formula::parse(f).unwrap());
+    assert!(calls(&t, "=TWICE(2)").is_empty());
+    assert!(calls(&t, "=LET(THRICE,LAMBDA(x,x*3),THRICE(2))").is_empty());
+    assert!(calls(&t, "=LAMBDA(HALF,HALF(4))(LAMBDA(x,x/2))").is_empty());
+    assert_eq!(calls(&t, "=THRICE(2)+TWICE(1)"), ["THRICE"]);
+    // The defined name is evaluated, and the cell is an ordinary formula.
+    t.set("A1", "3");
+    t.set("B1", "=TWICE(A1)");
+    t.set("B2", "=LET(THRICE,LAMBDA(x,x*3),THRICE(A1))");
+    assert_eq!((t.num("B1"), t.num("B2")), (6.0, 9.0));
+    assert!(!t.calc.is_foreign((0, c("B1"))) && !t.calc.is_foreign((0, c("B2"))));
+    // A sheet-scoped name wins on its own sheet only.
+    assert!(!t.calc.udf_names().is_udf_call_in(&t.wb, 0, "TWICE"));
+    t.wb.names.retain(|n| n.name != "Twice");
+    t.wb.names.push(gridcraft_model::DefinedName {
+        name: "Half".into(),
+        scope: Some(1),
+        formula: "LAMBDA(x,x/2)".into(),
+        comment: String::new(),
+        hidden: false,
+    });
+    assert!(t.calc.udf_names().is_udf_call_in(&t.wb, 0, "HALF"));
+    assert!(!t.calc.udf_names().is_udf_call_in(&t.wb, 1, "HALF"));
+}
+
+/// A workbook as a reader leaves it: Sheet1 has A1 = 2, and B1..B5 hold UDF-calling formulas
+/// with these saved results (B5 none); C1 reads B1. Calculated as on open.
+fn foreign_cells() -> T {
+    let mut t = T::new();
+    t.calc.set_udf_names(&t.wb, crate::UdfNames::new(["TWICE"]));
+    let saved = [
+        ("B1", "=TWICE(A1)", Value::Number(4.0)),
+        ("B2", "=_xludf.Name(A1)", Value::text("two")),
+        ("B3", "=_xludf.Flag(A1)", Value::Bool(true)),
+        ("B4", "=TWICE(A1)/0", Value::Error(CellError::Div0)),
+        ("B5", "=TWICE(A1)", Value::Empty),
+    ];
+    let sh = t.wb.sheet_mut(0).unwrap();
+    sh.cells.set(c("A1"), Cell::value(Value::Number(2.0)));
+    for (at, f, v) in saved {
+        sh.cells.set(c(at), Cell { value: v, ..Cell::formula(Formula::new(f)) });
+    }
+    sh.cells.set(c("C1"), Cell::formula(Formula::new("=B1+1")));
+    sh.cells.set(c("A2"), Cell::value(Value::Number(1.0)));
+    sh.cells.set(c("A3"), Cell::formula(Formula::new("=A2+1")));
+    sh.cells.set(c("B6"), Cell { value: Value::Number(4.0), ..Cell::formula(Formula::new("=TWICE(A3)")) });
+    t.calc.recalc_all(&mut t.wb);
+    t
+}
+
+/// Req 17.3, 17.4, 17.5: a foreign-result cell shows its saved result, type kept, through full
+/// recalculation and volatile recalculation elsewhere; without one it is `#BLOCKED!`.
+#[test]
+fn foreign_cells_keep_their_saved_results_while_clean() {
+    let mut t = foreign_cells();
+    let want = [
+        ("B1", Value::Number(4.0)),
+        ("B2", Value::text("two")),
+        ("B3", Value::Bool(true)),
+        ("B4", Value::Error(CellError::Div0)),
+        ("B5", Value::Error(CellError::Blocked)),
+        ("C1", Value::Number(5.0)),
+    ];
+    let check = |t: &T, when: &str| {
+        for (at, v) in &want {
+            assert_eq!(&t.get(at), v, "{at} {when}");
+        }
+    };
+    check(&t, "on open");
+    for at in ["B1", "B2", "B3", "B4", "B5"] {
+        assert!(t.calc.is_foreign((0, c(at))), "{at}");
+    }
+    assert!(!t.calc.is_foreign((0, c("C1"))));
+    t.calc.recalc_all(&mut t.wb);
+    check(&t, "after a full recalculation");
+    t.set("D1", "=NOW()");
+    t.set("E1", "1");
+    t.set("E2", "=RAND()+INDIRECT(\"A1\")");
+    check(&t, "after edits elsewhere and volatile recalculation");
+    t.wb.calc.mode = gridcraft_model::CalcMode::Manual;
+    t.set("E1", "2");
+    t.calc.recalc_all(&mut t.wb);
+    check(&t, "after a manual-mode edit elsewhere and F9");
+}
+
+/// Req 17.6, 17.7, 17.10: a precedent change or an edit of the formula blocks the cell, its
+/// readers calculate from `#BLOCKED!`, and no later calculation brings the saved result back.
+#[test]
+fn foreign_cells_are_blocked_once_a_precedent_or_their_formula_changes() {
+    let blocked = Value::Error(CellError::Blocked);
+    let mut t = foreign_cells();
+    t.set("A1", "3");
+    for at in ["B1", "B2", "B3", "B4", "B5", "C1"] {
+        assert_eq!(t.get(at), blocked, "{at}");
+    }
+    t.calc.recalc_all(&mut t.wb);
+    t.set("A1", "2");
+    assert_eq!((t.get("B1"), t.get("C1")), (blocked.clone(), blocked.clone()), "never computed, even with the old inputs back");
+    // A transitive precedent: B6 reads A3, which reads A2.
+    let mut t = foreign_cells();
+    assert_eq!(t.num("B6"), 4.0);
+    t.set("A2", "5");
+    assert_eq!((t.num("B1"), t.get("B6")), (4.0, blocked.clone()));
+    // An edited formula that still calls a UDF.
+    let mut t = foreign_cells();
+    t.set("B1", "=TWICE(A1)+0");
+    assert_eq!((t.get("B1"), t.get("C1")), (blocked.clone(), blocked.clone()));
+    assert!(t.calc.is_foreign((0, c("B1"))));
+    // Edited to a formula without one: calculated as usual.
+    t.set("B1", "=A1*2");
+    assert_eq!((t.num("B1"), t.num("C1")), (4.0, 5.0));
+    assert!(!t.calc.is_foreign((0, c("B1"))));
+    // Manual calculation: a precedent change blocks it at once.
+    let mut t = foreign_cells();
+    t.wb.calc.mode = gridcraft_model::CalcMode::Manual;
+    t.set("A1", "5");
+    assert_eq!(t.get("B1"), blocked);
+    assert_eq!(t.num("C1"), 5.0, "manual: readers wait for F9");
+    t.calc.recalc_all(&mut t.wb);
+    assert_eq!((t.get("B1"), t.get("C1")), (blocked.clone(), blocked));
+}
+
+/// Req 17.9: the value is part of the cell, so a snapshot taken before an edit (what undo puts
+/// back, followed by a graph rebuild) shows the saved result again, through recalculation too.
+#[test]
+fn a_restored_snapshot_brings_foreign_results_back() {
+    let mut t = foreign_cells();
+    let before = t.wb.clone();
+    t.set("A1", "3");
+    assert_eq!(t.get("B1"), Value::Error(CellError::Blocked));
+    t.wb = before;
+    t.calc.rebuild(&t.wb);
+    assert_eq!((t.num("B1"), t.num("C1")), (4.0, 5.0));
+    t.calc.recalc_all(&mut t.wb);
+    assert_eq!((t.num("B1"), t.num("C1")), (4.0, 5.0));
+    t.set("E1", "1");
+    assert_eq!(t.num("B1"), 4.0);
+}
+
+/// A UDF-calling formula depends on its argument cells and is not dynamic (Req 17.5 needs that);
+/// an unknown call that isn't a UDF call stays dynamic and evaluates to `#NAME?` as before.
+#[test]
+fn udf_calls_are_not_dynamic_but_unknown_calls_still_are() {
+    use crate::UdfNames;
+    let mut t = T::new();
+    t.calc.set_udf_names(&t.wb, UdfNames::new(["DIAGONALWERT"]));
+    t.set("A1", "1");
+    t.set("B1", "=DIAGONALWERT(A1)");
+    t.set("B2", "=_xludf.Foo(A1)+1");
+    t.set("B3", "=_xludf.SUM(A1)");
+    t.set("B4", "=NOSUCHFN(A1)");
+    t.set("B5", "=SUM(A1)");
+    let a1 = vec![crate::Area { sheet: 0, range: gridcraft_core::RangeRef::cell(c("A1")) }];
+    for (at, dynamic) in [("B1", false), ("B2", false), ("B3", false), ("B4", true), ("B5", false)] {
+        assert_eq!(t.calc.graph.is_dynamic((0, c(at))), dynamic, "{at}");
+        assert_eq!(t.calc.graph.precedents_of((0, c(at))), a1, "{at}");
+    }
+    // No VBA runs: a UDF call entered here is #BLOCKED! (Req 17.7), an unknown call #NAME?.
+    for at in ["B1", "B2", "B3"] {
+        assert_eq!(t.get(at), Value::Error(CellError::Blocked), "{at}");
+    }
+    assert_eq!(t.get("B4"), Value::Error(CellError::Name));
+    // Without the name, the same call is an unknown call again; setting names rebuilds the graph.
+    t.calc.set_udf_names(&t.wb, UdfNames::default());
+    assert!(t.calc.graph.is_dynamic((0, c("B1"))));
+    assert!(!t.calc.graph.is_dynamic((0, c("B2"))));
+    t.calc.set_udf_names(&t.wb, UdfNames::new(["diagonalwert"]));
+    assert!(!t.calc.graph.is_dynamic((0, c("B1"))));
+    assert_eq!(t.calc.udf_names().names().collect::<Vec<_>>(), ["DIAGONALWERT"]);
+    // A precedent change still reaches the UDF cell through the graph.
+    let mut deps = Vec::new();
+    t.calc.graph.dependents(0, c("A1"), &mut deps);
+    for at in ["B1", "B2", "B3", "B4", "B5"] {
+        assert!(deps.contains(&(0, c(at))), "{at} depends on A1");
+    }
 }

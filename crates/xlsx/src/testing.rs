@@ -1,5 +1,6 @@
-//! Test support: builds password-encrypted workbooks in code, so tests here and in the crates
-//! above (engine, UI) never need an encrypted file on disk. Compiled for this crate's tests and,
+//! Test support: builds password-encrypted workbooks, and `.xls` workbooks calling a VBA
+//! function, in code, so tests here and in the crates above (engine, UI) never need such a file
+//! on disk. Compiled for this crate's tests and,
 //! elsewhere, only with the `test-support` feature (a dev-dependency feature, never shipped).
 //!
 //! Salts and keys are fixed so the output is deterministic. This is not an encryptor for real
@@ -7,6 +8,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use aes::cipher::{BlockCipherEncrypt, KeyInit};
+use gridcraft_core::{CellError, CellRef, Value};
 
 use crate::crypto::{
     BLOCK_HMAC_KEY, BLOCK_HMAC_VALUE, BLOCK_KEY, BLOCK_VERIFIER_HASH, BLOCK_VERIFIER_INPUT, F_AES, F_CRYPTOAPI, Hash, PASSWORD_ENCRYPTOR, Params,
@@ -219,6 +221,93 @@ pub(crate) fn build_tree(root: &[Node]) -> Vec<u8> {
         }
     }
     out
+}
+
+/// One cell of [`xls_calling_vba_function`]'s sheet.
+pub enum XlsCell {
+    /// A number.
+    Number(f64),
+    /// `=FUNCTION(arg)`, calling the workbook's VBA function, with its saved result.
+    Call { arg: CellRef, saved: Value },
+    /// `=of*k`, with its saved result.
+    Times { of: CellRef, k: u16, saved: Value },
+}
+
+/// A BIFF8 `.xls` ([MS-CFB], [MS-XLS]) whose one sheet, `Sheet1`, holds `cells`, and whose
+/// globals declare `function` as Excel declares a VBA function a formula calls: a Lbl with
+/// fFunc, fProc and fOB set and no formula ([MS-XLS] 2.4.150). A call is `PtgName` to that Lbl
+/// followed by `PtgFuncVar` with iftab 255 ([MS-XLS] 2.5.198.103, 2.5.198.63). Saved results
+/// are numbers, text (a String record after the Formula record), booleans or errors.
+pub fn xls_calling_vba_function(function: &str, cells: &[(CellRef, XlsCell)]) -> Vec<u8> {
+    let rec = |id: u16, payload: &[u8]| {
+        let mut v = id.to_le_bytes().to_vec();
+        v.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+        v.extend_from_slice(payload);
+        v
+    };
+    let u16s = |v: &[u16]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+    let bof = |dt: u16| rec(0x0809, &[u16s(&[0x0600, dt, 0x0DBB, 0x07CC]), vec![0; 8]].concat());
+    let eof = rec(0x000A, &[]);
+    let at = |c: CellRef| u16s(&[c.row as u16, c.col as u16, 0]);
+    // PtgRef, value class, both relative.
+    let ptg_ref = |c: CellRef| [vec![0x44], u16s(&[c.row as u16, c.col as u16 | 0xC000])].concat();
+    let xlstr = |s: &str| [(s.len() as u16).to_le_bytes().to_vec(), vec![0], s.as_bytes().to_vec()].concat();
+
+    let mut sheet = bof(0x0010);
+    for (c, cell) in cells {
+        let (saved, rgce) = match cell {
+            XlsCell::Number(n) => {
+                sheet.extend(rec(0x0203, &[at(*c), n.to_le_bytes().to_vec()].concat()));
+                continue;
+            }
+            XlsCell::Call { arg, saved } => (saved, [vec![0x23], 1u32.to_le_bytes().to_vec(), ptg_ref(*arg), vec![0x42, 2, 0xFF, 0x00]].concat()),
+            XlsCell::Times { of, k, saved } => (saved, [ptg_ref(*of), vec![0x1E], k.to_le_bytes().to_vec(), vec![0x05]].concat()),
+        };
+        // FormulaValue: a number, or a typed value marked by 0xFFFF in its last two bytes.
+        let (cached, text) = match saved {
+            Value::Number(n) => (n.to_le_bytes(), None),
+            Value::Text(t) => ([0, 0, 0, 0, 0, 0, 0xFF, 0xFF], Some(t.to_string())),
+            Value::Bool(b) => ([1, 0, u8::from(*b), 0, 0, 0, 0xFF, 0xFF], None),
+            Value::Error(e) => ([2, 0, error_code(*e), 0, 0, 0, 0xFF, 0xFF], None),
+            other => panic!("no saved result {other:?} in the test .xls"),
+        };
+        let p = [at(*c), cached.to_vec(), vec![0; 6], (rgce.len() as u16).to_le_bytes().to_vec(), rgce].concat();
+        sheet.extend(rec(0x0006, &p));
+        if let Some(t) = text {
+            sheet.extend(rec(0x0207, &xlstr(&t)));
+        }
+    }
+    sheet.extend(&eof);
+
+    // fFunc (0x0002) | fProc (0x0008) | fOB (0x0010), no formula.
+    let lbl =
+        rec(0x0018, &[u16s(&[0x001A]), vec![0, function.len() as u8], u16s(&[0, 0, 0]), vec![0; 4], vec![0], function.as_bytes().to_vec()].concat());
+    let globals = |pos: u32| {
+        [
+            bof(0x0005),
+            rec(0x0085, &[pos.to_le_bytes().to_vec(), vec![0, 0, 6, 0], b"Sheet1".to_vec()].concat()),
+            rec(0x01AE, &u16s(&[1, 0x0401])),
+            rec(0x0017, &u16s(&[1, 0, 0, 0])),
+            lbl.clone(),
+            eof.clone(),
+        ]
+        .concat()
+    };
+    let stream = [globals(globals(0).len() as u32), sheet].concat();
+    compound_file(&[("Workbook", &stream)])
+}
+
+/// The BErr code of `e` ([MS-XLS] 2.5.11).
+fn error_code(e: CellError) -> u8 {
+    match e {
+        CellError::Null => 0x00,
+        CellError::Div0 => 0x07,
+        CellError::Value => 0x0F,
+        CellError::Ref => 0x17,
+        CellError::Name => 0x1D,
+        CellError::Num => 0x24,
+        _ => 0x2A,
+    }
 }
 
 fn encrypt_block(key: &[u8], block: &mut [u8; 16]) {

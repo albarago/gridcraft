@@ -9,7 +9,7 @@ pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(query "document.inspect", "Inspect Workbook", [], None, "{} → sheets, selection, names, tables, charts, dirty, trust (local|fromFile), history", has_doc, inspect),
         cmd!(query "sheet.read", "Read Range", [], None, "{range?: \"A1:D10\" (default: used range), sheet?, formulas?: bool, formatted?: bool} → rows of values", has_doc, read),
-        cmd!(query "cell.get", "Get Cell", [], None, "{cell?, sheet?} → value, formula, display text, style, comment, link, python {code, output, typeName, preview, stale}", has_doc, cell_get),
+        cmd!(query "cell.get", "Get Cell", [], None, "{cell?, sheet?} → value, formula, display text, style, comment, link, udfCalls (the VBA functions a formula calls, which are never run; its value is the saved result or #BLOCKED!), python {code, output, typeName, preview, stale}", has_doc, cell_get),
         cmd!(query "selection.stats", "Selection Statistics", [], None, "{} → count, sum, average, min, max", has_doc, sel_stats),
         cmd!(query "history.list", "Undo History", [], None, "{} → undo/redo labels, grouping (an undo group is open)", has_doc, history),
         cmd!(query "app.commands", "List Commands", [], None, "{search?} → ids, labels, params", always, list_commands),
@@ -137,6 +137,8 @@ fn cell_get(s: &mut Session, p: &Json) -> Result<Json> {
         "merge": sh.merge_at(c).map(|m| m.a1()),
         "comment": sh.comments.get(&c),
         "hyperlink": sh.hyperlinks.get(&c),
+        // The VBA functions a foreign-result cell's formula calls, which are never run.
+        "udfCalls": Some(d.udf_calls(sheet, c)).filter(|n| !n.is_empty()),
         "python": cell.and_then(|x| x.py.as_deref()).map(|py| json!({
             "code": py.code,
             "output": if py.object { "object" } else { "value" },

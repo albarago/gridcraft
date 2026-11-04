@@ -378,8 +378,9 @@ pub struct Ctx<'a> {
 }
 
 pub(crate) fn edit<R>(s: &mut Session, f: impl FnOnce(&mut Ctx) -> Result<R>) -> Result<R> {
-    let d = s.doc_mut()?;
-    commit(d, |cx| {
+    let Session { docs, active, vba_cache, .. } = s;
+    let d = docs.get_mut(*active).ok_or(EngineError::NoDocument)?;
+    commit_with(d, Some(vba_cache), |cx| {
         let r = f(cx)?;
         crate::tables::sync_headers(cx);
         Ok(r)
@@ -391,6 +392,17 @@ fn wall_clock() -> std::time::Duration {
 }
 
 pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>) -> Result<R> {
+    commit_with(d, None, f)
+}
+
+/// The most changed cells an edit's formulas are scanned for a call to a function calc doesn't
+/// know (see [`commit_with`]); a larger edit (a paste of a whole sheet) is not scanned.
+const UDF_SCAN_LIMIT: usize = 10_000;
+
+/// [`commit`], with the session's VBA cache: an edit entering a formula that calls a function
+/// calc doesn't know, in a workbook with a VBA project whose UDF names calc doesn't have yet,
+/// gets them first, so the call is a UDF call (`#BLOCKED!`, Req 17.7) and not `#NAME?`.
+fn commit_with<R>(d: &mut DocState, vba: Option<&mut crate::vba_cache::VbaCache>, f: impl FnOnce(&mut Ctx) -> Result<R>) -> Result<R> {
     // `GRIDCRAFT_PROFILE` timing, never on wasm where the clock traps. `elapsed` on the epoch
     // reads the wall clock without the (disallowed) `now`.
     let t0 = if cfg!(target_arch = "wasm32") { None } else { std::env::var_os("GRIDCRAFT_PROFILE").map(|_| wall_clock()) };
@@ -431,6 +443,20 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
     }
     if let Some(t0) = t0 {
         eprintln!("commit: edit {:?}, {} changed", since(t0), changed.len());
+    }
+    if let Some(vba) = vba
+        && wb.vba_project.is_some()
+        && changed.len() <= UDF_SCAN_LIMIT
+        && changed.iter().any(|&(si, c)| {
+            wb.sheet(si)
+                .and_then(|sh| sh.cell(c))
+                .and_then(|cell| cell.formula.as_ref())
+                .and_then(|f| f.expr_arc())
+                .is_some_and(|e| crate::vba_cache::calls_unknown(&wb, si, &e, d.calc.udf_names()))
+        })
+        && let Some(names) = vba.udf_names_for_entry(&wb, d.calc.udf_names())
+    {
+        crate::set_udf_names(&mut d.calc, &mut wb, names);
     }
     if structural {
         d.calc.recalc_all(&mut wb);

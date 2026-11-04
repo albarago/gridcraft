@@ -118,6 +118,7 @@ mod text_overflow_scroll;
 mod touch_pan;
 mod trace_navigation;
 mod translated_form_fields;
+mod udf_blocked_note;
 mod ui_clock;
 mod undo_while_grouping;
 mod validation_alert;

@@ -142,6 +142,9 @@ impl Scan<'_> {
             matches!(name, "SUMPRODUCT" | "MMULT" | "MINVERSE" | "MDETERM" | "TRANSPOSE" | "FREQUENCY" | "LINEST" | "LOGEST" | "TREND" | "GROWTH");
         let mut affected = false;
         let mut lifted = false;
+        // Excel passes a user-defined (VBA) function the range itself, as a Range parameter: a
+        // range argument doesn't make the call an implicit intersection (Req 17.11).
+        let udf = self.is_udf_call(name, sheet);
         let mut shapes = Vec::with_capacity(args.len().min(256));
         if args.len() > 255 {
             return Shape { array: true, affected: true };
@@ -150,7 +153,7 @@ impl Scan<'_> {
             let context = array_context || legacy_array || (name == "INDEX" && i == 0);
             let shape = self.expr(arg, sheet, context, depth);
             affected |= shape.affected;
-            if shape.array && scalar_arg(name, i) {
+            if shape.array && !udf && scalar_arg(name, i) {
                 lifted = true;
                 affected |= !context;
             }
@@ -201,7 +204,18 @@ impl Scan<'_> {
         };
         Shape { array, affected }
     }
+
+    /// Whether a call to `name` on `sheet` is a call to a user-defined (VBA) function: marked
+    /// `_xludf.`, or one of the workbook's UDF names ([`Workbook::udf_names`], which holds no
+    /// built-ins), and not a defined name visible from the sheet (a LAMBDA wins).
+    fn is_udf_call(&self, name: &str, sheet: usize) -> bool {
+        let marked = name.get(..XLUDF.len()).is_some_and(|p| p.eq_ignore_ascii_case(XLUDF));
+        (marked || self.wb.udf_names.iter().any(|n| n.eq_ignore_ascii_case(name))) && self.wb.name(name, sheet).is_none()
+    }
 }
+
+/// The prefix files write before a user-defined function's name.
+const XLUDF: &str = "_xludf.";
 
 fn positive(e: &Expr) -> bool {
     matches!(e, Expr::Number(n) if *n >= 1.0)
