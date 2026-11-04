@@ -1,4 +1,5 @@
-//! `vba.modules` and `vba.source` give the same JSON through every automation surface (Req 9.8):
+//! `vba.modules`, `vba.source` and `vba.analyze` give the same JSON through every automation
+//! surface (Req 9.8, 13.12):
 //! `Session::execute` (the UI's path), the `gridcraft-cli run` binary, the MCP `execute_command`
 //! tool, and the engine-level control-channel methods (`engine.execute`, and the command id used
 //! as a method) as the MCP `Headless` backend answers them. Results are compared as compact JSON
@@ -51,7 +52,8 @@ fn compact(v: &Value) -> String {
     serde_json::to_string(v).unwrap()
 }
 
-const CALLS: [(&str, &str); 3] = [("vba.modules", "{}"), ("vba.source", r#"{"module":"Module1"}"#), ("vba.source", r#"{"module":"klasse"}"#)];
+const CALLS: [(&str, &str); 4] =
+    [("vba.modules", "{}"), ("vba.source", r#"{"module":"Module1"}"#), ("vba.source", r#"{"module":"klasse"}"#), ("vba.analyze", "{}")];
 
 #[test]
 fn vba_commands_match_across_cli_mcp_and_session() {
@@ -60,6 +62,7 @@ fn vba_commands_match_across_cli_mcp_and_session() {
     let expected: Vec<String> = CALLS.iter().map(|(id, p)| compact(&session.execute(id, serde_json::from_str(p).unwrap()).unwrap())).collect();
     assert!(expected[0].contains(r#""kind":"standard","lines":4,"name":"Module1""#), "{}", expected[0]);
     assert!(expected[1].contains("Café — 5 €"), "{}", expected[1]);
+    assert!(expected[3].contains(r#""category":"uiDialogs","present":true"#), "{}", expected[3]);
 
     // CLI: one `{"command", "result"}` line per `--cmd`.
     let mut cli = Command::new(env!("CARGO_BIN_EXE_gridcraft-cli"));

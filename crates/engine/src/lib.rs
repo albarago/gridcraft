@@ -29,6 +29,12 @@ mod vba_cache;
 mod vba_source;
 pub mod windows;
 
+/// The VBA lexer, for colouring source in a view (design: the UI reads VBA data through
+/// commands, and only the pure lexing helper is re-exported). Lexing reads text and runs nothing.
+pub mod vba {
+    pub use gridcraft_vba::{Keyword, LexError, MAX_SOURCE, SourceTooLarge, Span, Token, TokenKind, lex};
+}
+
 use std::sync::Arc;
 
 use gridcraft_calc::Calc;

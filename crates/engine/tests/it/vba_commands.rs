@@ -1,5 +1,5 @@
-//! `vba.modules` and `vba.source` on a macro workbook that went through a real save and open
-//! (Req 9.1-9.6, 9.8; Req 1.3 for the .xlsx case). The project is built in code by the
+//! `vba.modules`, `vba.source` and `vba.analyze` on a macro workbook that went through a real
+//! save and open (Req 9.1-9.6, 9.8, 13.12, 13.13; Req 1.3 for the .xlsx case). The project is built in code by the
 //! Fixture_Builder, written into an .xlsm with the engine's `io` API, then opened from disk in a
 //! fresh session.
 //!
@@ -100,7 +100,12 @@ fn vba_commands_give_identical_json_through_every_session_entry_point() {
     let path = dir.file("Macros.xlsm");
     write_xlsm(&fixture(), &path);
     let mut s = open(&path);
-    for (id, params) in [("vba.modules", json!({})), ("vba.source", json!({"module": "Module1"})), ("vba.source", json!({"module": "klasse"}))] {
+    for (id, params) in [
+        ("vba.modules", json!({})),
+        ("vba.source", json!({"module": "Module1"})),
+        ("vba.source", json!({"module": "klasse"})),
+        ("vba.analyze", json!({})),
+    ] {
         let ui = serde_json::to_string(&s.execute(id, params.clone()).unwrap()).unwrap();
         let headless = serde_json::to_string(&s.execute_headless(id, params.clone()).unwrap()).unwrap();
         let targeted = serde_json::to_string(&s.execute_headless_in(Target::Active, id, params.clone()).unwrap()).unwrap();
@@ -127,6 +132,23 @@ fn saving_as_xlsx_drops_the_project() {
     assert_eq!(r, json!({"project": {"name": null, "codePage": null, "signed": false, "diagnostics": []}, "modules": []}));
     let e = reopened.execute("vba.source", json!({"module": "Module1"})).unwrap_err();
     assert!(matches!(&e, EngineError::Other(m) if m == "unknown module: Module1"), "{e:?}");
+    assert_eq!(reopened.execute("vba.analyze", json!({})).unwrap()["verdict"], "noMacros");
+}
+
+#[test]
+fn vba_analyze_after_save_and_open() {
+    let dir = TempDir::new("analyze");
+    let path = dir.file("Macros.xlsm");
+    write_xlsm(&fixture(), &path);
+    let mut s = open(&path);
+    let r = s.execute("vba.analyze", json!({})).unwrap();
+    // Klasse's `Größe` member and MsgBox are fine; Workbook_Open is an event handler and auto-exec.
+    let open_proc = r["procedures"].as_array().unwrap().iter().find(|p| p["name"] == "Workbook_Open").unwrap();
+    assert_eq!(open_proc["marks"], json!(["eventHandler", "autoExec"]), "{r}");
+    let present: Vec<_> =
+        r["manifest"]["categories"].as_array().unwrap().iter().filter(|c| c["present"] == true).map(|c| c["category"].as_str().unwrap()).collect();
+    assert_eq!(present, ["uiDialogs", "eventHandlers", "autoExec"], "{r}");
+    assert_eq!(r["verdict"], "wouldRunInFuturePhase", "{r}");
 }
 
 #[test]

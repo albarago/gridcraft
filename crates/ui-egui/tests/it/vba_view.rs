@@ -208,3 +208,40 @@ fn the_kept_sentence_shows_in_the_dialog_and_in_view_code() {
     h.run_steps(6);
     assert!(h.query_by_label(VIEW_KEPT).is_some(), "View Code says it too (Req 8.8)");
 }
+/// A project whose standard module calls `Shell` and runs on open.
+fn shell_project() -> Fixture {
+    Fixture::new(vec![
+        FixtureModule::new(
+            "Runner",
+            ModuleKind::Standard,
+            "Attribute VB_Name = \"Runner\"\r\nSub Auto_Open()\r\n    Shell \"notepad.exe\"\r\nEnd Sub\r\n",
+        ),
+        FixtureModule::new("ThisWorkbook", ModuleKind::Document, "Attribute VB_Name = \"ThisWorkbook\"\r\n"),
+    ])
+}
+#[test]
+fn the_compatibility_tab_shows_the_verdict_and_the_flags() {
+    let mut h = harness("compat", Some(shell_project()));
+    view_code(&mut h);
+    let before = state(&h);
+    assert!(h.query_by_label_contains("Verdict:").is_none(), "the Source tab comes first");
+    h.get_by_label("Compatibility").click();
+    h.run_steps(6);
+    assert_eq!(h.state().dialog.as_ref().map(|d| d.tab.clone()).as_deref(), Some("Compatibility"));
+    let headings: Vec<String> = h.get_all_by_role(Role::Heading).filter_map(|n| n.accesskit_node().value()).collect();
+    assert!(headings.iter().any(|t| t == "Verdict: Uses unsupported features"), "the verdict headline (Req 13.14): {headings:?}");
+    assert!(headings.iter().any(|t| t == "Flagged constructs (1)"), "{headings:?}");
+    assert!(h.query_by_label_contains("Shell in Runner, line 3").is_some(), "the verdict's reason");
+    assert!(h.query_by_label("Shell: Runner, line 3").is_some(), "a row for the Shell flag");
+    assert!(h.query_by_label_contains("Processes and native code: present (1)").is_some(), "the process capability");
+    assert!(h.query_by_label("Network: absent").is_some(), "an absent capability");
+    assert!(h.query_by_label("entry point, auto-exec").is_some(), "Auto_Open's marks");
+    assert!(h.query_by_label_contains("Source of ").is_none(), "the source view is on the other tab");
+    // The tab shows what vba.analyze returns, and reading it changed nothing.
+    let report = h.state_mut().run("vba.analyze", json!({})).unwrap();
+    assert_eq!(h.state().dialog.as_ref().and_then(|d| d.values.get("analysis")), Some(&report));
+    assert_eq!(state(&h), before);
+    h.get_by_label("Source").click();
+    h.run_steps(4);
+    assert_eq!(shown(&h).0, "Runner");
+}

@@ -16,7 +16,7 @@ use crate::theme::{self, Syntax, Tokens};
 pub enum Lang {
     Python,
     Latex,
-    /// A workbook's VBA, coloured by the static keyword list in [`vba`].
+    /// A workbook's VBA, coloured from the VBA lexer's tokens ([`vba`]).
     Vba,
     Plain,
 }
@@ -31,6 +31,8 @@ pub enum Token {
     Number,
     Comment,
     Builtin,
+    /// Source the language's lexer couldn't read (VBA only).
+    Error,
 }
 
 /// Spaces one Tab inserts.
@@ -205,6 +207,15 @@ fn color(s: &Syntax, token: Token) -> egui::Color32 {
         Token::Number => s.number,
         Token::Comment => s.comment,
         Token::Builtin => s.builtin,
+        Token::Error => s.error,
+    }
+}
+/// The coloured spans of `text`, as [`highlight`] gives them; VBA's come from
+/// [`vba::highlight_cached`], so a source shown frame after frame is lexed once.
+fn shared_spans(text: &str, lang: Lang) -> vba::Spans {
+    match lang {
+        Lang::Vba => vba::highlight_cached(text),
+        _ => highlight(text, lang).into(),
     }
 }
 
@@ -217,7 +228,7 @@ pub fn font() -> FontId {
 pub fn layout_job(text: &str, lang: Lang, font: &FontId, plain: egui::Color32, syntax: &Syntax, wrap_width: f32) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     let mut pos = 0usize;
-    for (range, token) in highlight(text, lang) {
+    for (range, token) in shared_spans(text, lang).iter().cloned() {
         if range.start < pos {
             continue;
         }

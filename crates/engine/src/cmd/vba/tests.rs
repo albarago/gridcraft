@@ -1,4 +1,4 @@
-//! `vba.modules` and `vba.source` (Req 9.1-9.6, 9.9).
+//! `vba.modules`, `vba.source` (Req 9.1-9.6, 9.9) and `vba.analyze` (Req 13.12, 13.13, 13.15).
 use super::{find_module, line_count};
 use crate::{EngineError, Session};
 use gridcraft_model::Workbook;
@@ -95,12 +95,115 @@ fn the_commands_open_no_dialog_and_change_nothing() {
     s.take_ui_requests();
     let (dirty, revision) = (s.doc().unwrap().is_dirty(), s.doc().unwrap().revision);
     let wb = s.doc().unwrap().wb.clone();
-    for (id, params) in [("vba.modules", json!({})), ("vba.source", json!({})), ("vba.source", json!({"module": "Class1"}))] {
+    for (id, params) in
+        [("vba.modules", json!({})), ("vba.source", json!({})), ("vba.source", json!({"module": "Class1"})), ("vba.analyze", json!({}))]
+    {
         let _ = s.execute(id, params);
         let d = s.doc().unwrap();
         assert!(Arc::ptr_eq(&d.wb, &wb) && d.is_dirty() == dirty && d.revision == revision && d.undo.is_empty(), "{id}");
     }
     assert!(s.take_ui_requests().iter().all(|q| !matches!(q, crate::UiRequest::Dialog(..))));
+}
+/// A flagged module (`Shell`), a stomped one, an unparsed one and a clean one.
+fn analyze_fixture() -> Fixture {
+    Fixture::new(vec![
+        FixtureModule::new(
+            "Flagged",
+            ModuleKind::Standard,
+            "Sub Run1()\r\n  Shell \"calc.exe\"\r\n  Set o = CreateObject(\"Scripting.FileSystemObject\")\r\nEnd Sub\r\n",
+        ),
+        FixtureModule::new("Stomped", ModuleKind::Standard, "Attribute VB_Name = \"Stomped\"\r\n").with_pcode(64),
+        FixtureModule::new("Broken", ModuleKind::Standard, "Sub Good(ByVal n As Long)\r\nEnd Sub\r\nSub Bad()\r\n  If\r\nEnd Sub\r\n"),
+        FixtureModule::new("Clean", ModuleKind::Standard, "Function Twice(x)\r\n  Twice = x * 2\r\nEnd Function\r\n"),
+    ])
+}
+#[test]
+fn vba_analyze_reports_flags_unreadable_unparsed_and_clean_modules() {
+    let mut s = opened(&analyze_fixture());
+    let r = s.execute("vba.analyze", json!({})).unwrap();
+    assert_eq!(r["verdict"], "usesUnsupportedFeatures", "{r}");
+    let reasons = r["reasons"].as_array().unwrap();
+    assert_eq!(reasons[0], json!({"rule": "flagged", "flag": "Shell", "module": "Flagged", "line": 2}));
+    assert_eq!(reasons[1], json!({"rule": "flagged", "flag": "CreateObject", "module": "Flagged", "line": 3}));
+    assert!(reasons.contains(&json!({"rule": "unparsedModule", "module": "Broken", "line": 4})), "{r}");
+    assert!(reasons.contains(&json!({"rule": "unreadableModule", "module": "Stomped"})), "{r}");
+    assert_eq!(
+        r["flags"],
+        json!([
+            {"kind": "Shell", "module": "Flagged", "startLine": 2, "endLine": 2},
+            {"kind": "CreateObject", "module": "Flagged", "startLine": 3, "endLine": 3, "progId": "Scripting.FileSystemObject"},
+        ])
+    );
+    assert_eq!((&r["unparsed"], &r["unreadable"]), (&json!(["Broken"]), &json!(["Stomped"])));
+    let procs = r["procedures"].as_array().unwrap();
+    let names: Vec<_> = procs.iter().map(|p| p["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["Run1", "Good", "Twice"], "the recovered `Bad` isn't listed");
+    assert_eq!(
+        procs[0],
+        json!({"module": "Flagged", "name": "Run1", "kind": "sub", "params": [], "startLine": 1, "endLine": 4, "marks": ["entryPoint"]})
+    );
+    assert_eq!(procs[1]["params"], json!([{"name": "n", "type": "Long"}]));
+    assert_eq!(
+        (&procs[2]["kind"], &procs[2]["params"], &procs[2]["marks"]),
+        (&json!("function"), &json!([{"name": "x", "type": "Variant"}]), &json!(["udfCandidate"]))
+    );
+    let m = &r["manifest"];
+    let cats: Vec<_> = m["categories"].as_array().unwrap().iter().map(|c| c["category"].as_str().unwrap()).collect();
+    assert_eq!(cats, ["fileRead", "fileWrite", "network", "process", "registry", "clipboard", "uiDialogs", "eventHandlers", "autoExec"]);
+    let process = &m["categories"][3];
+    assert_eq!(process["present"], true);
+    assert_eq!(process["spans"][0], json!({"module": "Flagged", "startLine": 2, "startCol": 3, "endLine": 2, "endCol": 18, "construct": "Shell"}));
+    assert!(m["categories"].as_array().unwrap().iter().all(|c| c["present"] == !c["spans"].as_array().unwrap().is_empty()));
+    assert_eq!(m["incomplete"], true);
+    assert_eq!(m["incompleteReasons"], json!([{"kind": "unparsedModule", "module": "Broken"}, {"kind": "unreadableModule", "module": "Stomped"}]));
+    assert_eq!(m["dynamic"], json!([]));
+    assert!(r["members"].as_array().unwrap().iter().all(|m| m["status"] == "unknown" && m["count"].as_u64().is_some_and(|c| c > 0)));
+}
+#[test]
+fn vba_analyze_writes_dynamic_uses_and_members() {
+    let src = "Sub A()\r\n  CallByName ws, \"Name\", VbGet\r\n  ws.Range(\"A1\").Value = 1\r\nEnd Sub\r\n";
+    let mut s = opened(&Fixture::new(vec![FixtureModule::new("M", ModuleKind::Standard, src)]));
+    let r = s.execute("vba.analyze", json!({})).unwrap();
+    assert_eq!(
+        r["manifest"]["dynamic"],
+        json!([{"module": "M", "span": {"startLine": 2, "startCol": 3, "endLine": 2, "endCol": 30}, "construct": "CallByName"}])
+    );
+    assert_eq!(r["manifest"]["incompleteReasons"], json!([{"kind": "dynamic"}]));
+    assert_eq!(
+        r["members"],
+        json!([
+            {"object": "Range", "member": "Value", "count": 1, "status": "unknown"},
+            {"object": "ws", "member": "Range", "count": 1, "status": "unknown"},
+        ])
+    );
+    assert_eq!(r["verdict"], "analysisOnly");
+    assert_eq!(r["reasons"][0], json!({"rule": "memberUnknown", "member": "Range.Value"}));
+}
+#[test]
+fn vba_analyze_without_a_project_is_no_macros_not_an_error() {
+    let mut s = no_project();
+    let r = s.execute("vba.analyze", json!({})).unwrap();
+    let categories: Vec<Json> = ["fileRead", "fileWrite", "network", "process", "registry", "clipboard", "uiDialogs", "eventHandlers", "autoExec"]
+        .iter()
+        .map(|c| json!({"category": c, "present": false, "spans": []}))
+        .collect();
+    assert_eq!(
+        r,
+        json!({
+            "verdict": "noMacros", "reasons": [], "procedures": [], "members": [], "flags": [], "unparsed": [], "unreadable": [],
+            "manifest": {"categories": categories, "dynamic": [], "incomplete": false, "incompleteReasons": []},
+        })
+    );
+}
+#[test]
+fn vba_analyze_is_cached_with_the_project() {
+    let mut s = opened(&analyze_fixture());
+    let first = s.execute("vba.analyze", json!({})).unwrap();
+    let again = s.execute("vba.analyze", json!({"ignored": true})).unwrap();
+    assert_eq!(first, again);
+    assert_eq!((s.vba_cache.parses, s.vba_cache.analyses), (1, 1), "one read and one analysis");
+    s.execute("vba.modules", json!({})).unwrap();
+    assert_eq!(s.vba_cache.parses, 1, "vba.modules reuses the read project");
 }
 #[test]
 fn line_counts_follow_crlf_lf_and_cr() {
