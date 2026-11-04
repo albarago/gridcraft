@@ -29,12 +29,15 @@ pub mod dir;
 pub mod encoding;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fixture;
+pub mod lexer;
 pub mod ovba;
 pub mod project;
 pub mod project_stream;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testutil;
+
 pub use diag::{Diag, DiagCode, Severity};
 pub use dir::ReferenceKind;
+pub use lexer::{Keyword, LexError, MAX_SOURCE, SourceTooLarge, Span, Token, TokenKind, lex};
 pub use project::{Limits, MAX_TOTAL_SOURCE, Reference, SIGNATURE_STREAMS, StreamSource, VbaModule, VbaProject, mark_signed, read_project};
 pub use project_stream::ModuleKind;
