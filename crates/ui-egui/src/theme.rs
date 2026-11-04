@@ -180,12 +180,26 @@ pub struct Syntax {
     pub number: Color32,
     pub comment: Color32,
     pub builtin: Color32,
+    /// Source the lexer couldn't read: the danger colour.
+    pub error: Color32,
 }
 
-const LIGHT_SYNTAX: Syntax =
-    Syntax { keyword: rgb(0x0B57B3), string: rgb(0xA3361B), number: rgb(0x157A5A), comment: rgb(0x6B7280), builtin: rgb(0x7B3FB5) };
-const DARK_SYNTAX: Syntax =
-    Syntax { keyword: rgb(0x6FAEFF), string: rgb(0xF09A7A), number: rgb(0x7FD1A8), comment: rgb(0x9AA3AE), builtin: rgb(0xC69BF2) };
+const LIGHT_SYNTAX: Syntax = Syntax {
+    keyword: rgb(0x0B57B3),
+    string: rgb(0xA3361B),
+    number: rgb(0x157A5A),
+    comment: rgb(0x6B7280),
+    builtin: rgb(0x7B3FB5),
+    error: rgb(0xC42B1C),
+};
+const DARK_SYNTAX: Syntax = Syntax {
+    keyword: rgb(0x6FAEFF),
+    string: rgb(0xF09A7A),
+    number: rgb(0x7FD1A8),
+    comment: rgb(0x9AA3AE),
+    builtin: rgb(0xC69BF2),
+    error: rgb(0xFF9585),
+};
 const SHEET_CONTROL_BG: Color32 = rgb(0xF3F3F3);
 const SHEET_CONTROL_BORDER: Color32 = rgb(0x8A8A8A);
 const SHEET_CONTROL_TEXT: Color32 = rgb(0x1F1F1F);

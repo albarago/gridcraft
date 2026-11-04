@@ -334,6 +334,20 @@ pub enum ProcKind {
     PropertySet,
 }
 
+impl ProcKind {
+    /// A stable name for JSON: `sub`, `function`, `propertyGet`, `propertyLet` or `propertySet`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Sub => "sub",
+            Self::Function => "function",
+            Self::PropertyGet => "propertyGet",
+            Self::PropertyLet => "propertyLet",
+            Self::PropertySet => "propertySet",
+        }
+    }
+}
+
 /// A `Sub`, `Function` or `Property` procedure (§5.3).
 ///
 /// A procedure whose body didn't parse is kept: its `body` holds the statements that parsed before
