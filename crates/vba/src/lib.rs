@@ -44,7 +44,7 @@ pub mod testutil;
 
 pub use analyze::{
     CapSpan, Capability, CapabilityManifest, CategoryEntry, CompatibilityReport, DynamicUse, EmptyCatalog, Flag, FlagKind, IncompleteReason, Mark,
-    MemberCatalog, MemberStatus, MemberUse, ParamInfo, ProcInfo, ProgId, Reason, Verdict, VerdictRule, analyze,
+    MemberCatalog, MemberStatus, MemberUse, ParamInfo, ProcInfo, ProgId, Reason, Verdict, VerdictRule, analyze, udf_names,
 };
 pub use ast::Module;
 pub use catalog::ExcelCatalog;

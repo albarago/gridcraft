@@ -8,10 +8,12 @@ mod precision;
 pub mod recalc;
 mod spill_index;
 mod trimrange;
+pub mod udf;
 
 pub use eval::{Area, SPECIAL_FUNCTIONS, is_known_function};
 pub use precision::DisplayedPrecision;
 pub use recalc::{Calc, Key, evaluate, now_serial};
+pub use udf::UdfNames;
 
 #[cfg(test)]
 mod tests;

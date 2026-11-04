@@ -425,4 +425,9 @@ impl Graph {
     pub fn precedents_of(&self, k: Key) -> Vec<Area> {
         self.nodes.get(&k).map(|n| n.areas.clone()).unwrap_or_default()
     }
+    /// Whether the formula at `k` is recalculated whatever changes (INDIRECT, names, unknown
+    /// functions; see `precedents`).
+    pub fn is_dynamic(&self, k: Key) -> bool {
+        self.dynamic.contains(&k)
+    }
 }

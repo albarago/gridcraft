@@ -16,8 +16,10 @@
 //! project of 5.9 MB of source (25,600 procedures), it took 230 ms in a release build (361 ms in
 //! a debug build), roughly 40 ms per MB. A View Code window that refreshes the report on every
 //! open would pay that each time, so the report is kept; it is small next to the source.
+use std::collections::BTreeSet;
 use std::sync::{Arc, Weak};
 
+use gridcraft_calc::UdfNames;
 use gridcraft_model::Workbook;
 use gridcraft_vba::{CompatibilityReport, ExcelCatalog, Limits, VbaProject};
 
@@ -29,6 +31,7 @@ struct Slot {
     signature_part: bool,
     project: Arc<VbaProject>,
     report: Option<Arc<CompatibilityReport>>,
+    udf_names: Option<Arc<BTreeSet<String>>>,
 }
 
 #[derive(Default)]
@@ -78,6 +81,39 @@ impl VbaCache {
         report
     }
 
+    /// The names of the UDF candidates of `wb`'s VBA project ([`gridcraft_vba::udf_names`]),
+    /// found on the first request and reused with the project. Empty without a project.
+    pub(crate) fn udf_names(&mut self, wb: &Workbook) -> Arc<BTreeSet<String>> {
+        let Some(slot) = self.slot(wb) else { return Arc::default() };
+        if let Some(names) = &slot.udf_names {
+            return names.clone();
+        }
+        let names = Arc::new(gridcraft_vba::udf_names(&slot.project));
+        slot.udf_names = Some(names.clone());
+        names
+    }
+
+    /// The UDF names calc matches calls against in `wb` (Req 17.1): the public `Function`s of
+    /// its VBA project's standard modules, and the `.xls` macro names
+    /// ([`Workbook::xls_macro_names`]). The project is read only when some formula calls a
+    /// function calc doesn't know and that isn't marked `_xludf.` (which needs no name list):
+    /// a macro workbook whose formulas call only built-ins is opened without reading its
+    /// project (Req 6.3).
+    pub(crate) fn calc_udf_names(&mut self, wb: &Workbook) -> UdfNames {
+        let vba = if wb.vba_project.is_some() && calls_an_unknown_function(wb) { self.udf_names(wb) } else { Arc::default() };
+        UdfNames::new(vba.iter().chain(&wb.xls_macro_names))
+    }
+
+    /// The UDF names for `wb` after an edit entered a formula calling a function calc doesn't
+    /// know (Req 17.7), when they differ from `have`, the names calc has: the workbook's project
+    /// is read now if it wasn't on open (once; the names are kept with it). `None` when they
+    /// are the same.
+    pub(crate) fn udf_names_for_entry(&mut self, wb: &Workbook, have: &UdfNames) -> Option<UdfNames> {
+        let vba = self.udf_names(wb);
+        let names = UdfNames::new(vba.iter().chain(&wb.xls_macro_names));
+        (names != *have).then_some(names)
+    }
+
     /// `wb`'s slot, made (and its project read) on the first request and moved to the back as
     /// the most recently used; `None` when `wb` has no project.
     fn slot(&mut self, wb: &Workbook) -> Option<&mut Slot> {
@@ -97,7 +133,7 @@ impl VbaCache {
         if self.slots.len() >= MAX_SLOTS {
             self.slots.remove(0);
         }
-        self.slots.push(Slot { bytes: Arc::downgrade(bytes), signature_part, project, report: None });
+        self.slots.push(Slot { bytes: Arc::downgrade(bytes), signature_part, project, report: None, udf_names: None });
         self.slots.last_mut()
     }
 
@@ -106,6 +142,28 @@ impl VbaCache {
     pub(crate) fn len(&self) -> usize {
         self.slots.len()
     }
+}
+
+/// Whether a formula in `wb` calls a function that is neither a built-in, nor marked `_xludf.`,
+/// nor a defined name: the only calls whose UDF-ness depends on the VBA project.
+fn calls_an_unknown_function(wb: &Workbook) -> bool {
+    wb.sheets.iter().enumerate().any(|(si, sheet)| {
+        let none = UdfNames::default();
+        sheet.cells.iter().any(|(_, cell)| cell.formula.as_ref().and_then(|f| f.expr_arc()).is_some_and(|e| calls_unknown(wb, si, &e, &none)))
+    })
+}
+
+/// Whether `e`, a formula on `sheet` of `wb`, calls a function that is neither a built-in, nor
+/// marked `_xludf.`, nor a defined name visible from the sheet, nor in `have`.
+pub(crate) fn calls_unknown(wb: &Workbook, sheet: usize, e: &gridcraft_formula::Expr, have: &UdfNames) -> bool {
+    let mut found = false;
+    e.walk(&mut |x| {
+        if let gridcraft_formula::Expr::Call(n, _) = x {
+            // `is_udf_call` is true for `_xludf.` calls whatever `have` holds.
+            found |= !gridcraft_calc::is_known_function(n) && !have.is_udf_call(n) && wb.name(n, sheet).is_none();
+        }
+    });
+    found
 }
 
 #[cfg(test)]

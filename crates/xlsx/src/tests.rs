@@ -32,6 +32,7 @@ mod sheet_data_pin;
 mod sheet_names;
 mod smooth_roundtrip;
 mod trendline_roundtrip;
+mod udf_saved_results;
 mod xls_style_tests;
 mod xls_tests;
 mod xlsb_tests;
