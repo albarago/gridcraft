@@ -1,5 +1,6 @@
-//! Reads VBA projects (`vbaProject.bin`) from their public specifications ([MS-OVBA], later
-//! [MS-VBAL]). Read-only: nothing here runs VBA.
+//! Reads VBA projects (`vbaProject.bin`) from their public specifications ([MS-OVBA]) and lexes
+//! and parses module source ([MS-VBAL]), and prints syntax trees back as source. Read-only:
+//! nothing here runs VBA.
 //!
 //! The crate depends on `gridcraft-core` only, so it stays small, wasm-safe and usable outside
 //! the workbook stack. It never opens the compound file itself: callers hand it the streams.
@@ -8,7 +9,13 @@
 //! [MS-VBAL]: https://learn.microsoft.com/en-us/openspecs/microsoft_general_purpose_programming_languages/ms-vbal/
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
+pub mod ast;
 pub mod lexer;
 pub mod ovba;
+pub mod parser;
+pub mod print;
 
+pub use ast::Module;
 pub use lexer::{Keyword, LexError, MAX_SOURCE, SourceTooLarge, Span, Token, TokenKind, lex};
+pub use parser::{ParseDiag, ParseDiagKind, parse};
+pub use print::print_module;
